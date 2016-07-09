@@ -120,14 +120,8 @@ def train():
             tf.tile(tf.expand_dims(tf.transpose(tf.pack([data, output_mean, data - output_mean]), perm=[1, 0, 2]), 2),
                     [1, 1, num_copies, 1]), [-1, 3 * num_copies, SIG_LEN])
         lm.summaries.image_summary('posterior_sample', tf.expand_dims(image, -1), 5)
-        actual_mean = tf.reduce_mean(latent_sample, reduction_indices=[0], keep_dims=True)
-        actual_cov = tf.matmul(latent_sample, latent_sample, transpose_a=True)/tf.cast(tf.shape(latent_sample)[0], tf.float32)-tf.transpose(actual_mean)*actual_mean
-        ideal_cov = tf.diag(tf.ones((LATENT_DIM,)))
-        cov_penalty = tf.reduce_sum(tf.square(actual_cov - ideal_cov)) + tf.reduce_sum(tf.square(actual_mean))
-        likelihood_bound = likelihood_bound
-        lm.summaries.image_summary('cov', tf.reshape(tf.concat(1, (tf.nn.relu(actual_cov), ideal_cov)), (1, LATENT_DIM, 2*LATENT_DIM, 1)))
         rough_error = tf.reduce_mean(tf.square(tf.reduce_mean(tf.square(output_mean), reduction_indices=[1]) - tf.reduce_mean(tf.square(data), reduction_indices=[1])))
-        return output_mean, likelihood_bound, rough_error, cov_penalty
+        return output_mean, likelihood_bound, rough_error
 
     def prior_model():
         latent_sample = tf.random_normal((PRIOR_BATCH_SIZE, LATENT_DIM))
@@ -139,14 +133,14 @@ def train():
         return output_mean, sample_image
 
     with tf.name_scope('posterior'):
-        posterior_mean, likelihood_bound, rough_error, cov_penalty = full_model(training_batch)
+        posterior_mean, likelihood_bound, rough_error = full_model(training_batch)
     training_merged = lm.summaries.merge_all_summaries()
     tf.get_variable_scope().reuse_variables()
     with tf.name_scope('prior'):
         prior_mean, prior_sample = prior_model()
     lm.summaries.reset()
     with tf.name_scope('test'):
-        test_posterior_mean, test_likelihood_bound, _, test_cov_penalty = full_model(fed_input_data)
+        test_posterior_mean, test_likelihood_bound, _ = full_model(fed_input_data)
     test_merged = lm.summaries.merge_all_summaries()
 
     saver = tf.train.Saver(tf.trainable_variables())
@@ -155,7 +149,7 @@ def train():
     learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, batch, 5000, 0.8, staircase=True)
 
     pretrain_step = tf.train.AdamOptimizer(0.03).minimize(rough_error, var_list=lm.scale_factory.variables)
-    train_step = tf.train.AdamOptimizer(learning_rate).minimize(100.0*cov_penalty-likelihood_bound, global_step=batch, var_list=lm.weight_factory.variables + lm.bias_factory.variables)
+    train_step = tf.train.AdamOptimizer(learning_rate).minimize(-likelihood_bound, global_step=batch, var_list=lm.weight_factory.variables + lm.bias_factory.variables)
 
     def feed_dict(mode):
         """Make a TensorFlow feed_dict: maps data onto Tensor placeholders."""
@@ -185,9 +179,9 @@ def train():
                 log('starting training')
                 for i in xrange(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
-                        summary, acc, cp = sess.run([test_merged, test_likelihood_bound, test_cov_penalty], feed_dict=feed_dict('test'))
+                        summary, acc = sess.run([test_merged, test_likelihood_bound], feed_dict=feed_dict('test'))
                         test_writer.add_summary(summary, i)
-                        log('batch %s: Test set likelihood bound = %s, cov penalty = %s' % (i, acc, cp))
+                        log('batch %s: Test set likelihood bound = %s' % (i, acc))
                     if i % 100 == 99: # Record a summary
                         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                         run_metadata = tf.RunMetadata()
