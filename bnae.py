@@ -63,9 +63,6 @@ def train():
         training_batch = tf.train.batch([random_training_example], batch_size=BATCH_SIZE, enqueue_many=True)
         fed_input_data = tf.placeholder(tf.float32, [None, SIG_LEN])
 
-    def log_std_act(log_std):
-        return tf.clip_by_value(log_std, -6.0, 6.0)
-
     def id_act(z):
         return z
 
@@ -76,8 +73,7 @@ def train():
         last = data
         for i in xrange(NUM_HIDDEN_LAYERS):
             last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'encoder/hidden{}'.format(i), act=double_relu)
-        with tf.variable_scope('latent'):
-            latent = lm.nn_layer(last, LATENT_DIM, 'mean', act=id_act, bias=False, scale=False)
+        latent = lm.nn_layer(last, LATENT_DIM, 'latent', act=id_act, bias=False, scale=False)
         return latent
 
     def decoder(code):
@@ -95,7 +91,7 @@ def train():
         #     cos_weight = lm.nn_layer(last, 1, 'decoder/log_std_cos_weight{}'.format(i))
         #     output_log_std = output_log_std + lm.parametrized_sinusoid(SIG_LEN, 2*norm_freq*i, sin_weight, cos_weight)
         # output_log_std = log_std_act(output_log_std)
-        output = lm.nn_layer(last, SIG_LEN, 'output/mean', act=id_act)
+        output = lm.nn_layer(last, SIG_LEN, 'output', act=id_act)
         return output
 
     def full_model(data):
@@ -103,14 +99,6 @@ def train():
         output = decoder(latent)
 
         with tf.name_scope('error'):
-            #minus_kl = 0.5 * tf.reduce_sum(1.0 + 2.0 * latent_log_std - tf.square(latent_mean) - tf.exp(2.0 * latent_log_std), reduction_indices=[1])
-            #minus_kl = 0.0
-            # Normal
-            #reconstruction_error = tf.reduce_sum(-0.5 * numpy.log(2 * numpy.pi) - output_log_std - 0.5 * tf.square(output - data) / tf.exp(2.0 * output_log_std), reduction_indices=[1])
-            # Laplace
-            # reconstruction_error = tf.reduce_sum(-numpy.log(2.0) - output_log_std - abs(output-data)/tf.exp(output_log_std), reduction_indices=[1])
-
-            #error = tf.reduce_mean(minus_kl + reconstruction_error)
             error = tf.reduce_mean(tf.square(data-output))
             lm.summaries.scalar_summary('error', error)
         num_copies = 85
@@ -134,15 +122,15 @@ def train():
         return output, sample_image
 
     with tf.name_scope('posterior'):
-        posterior_mean, error = full_model(training_batch)
+        reconstruction, error = full_model(training_batch)
     training_merged = lm.summaries.merge_all_summaries()
     lm.is_training = False
     tf.get_variable_scope().reuse_variables()
     with tf.name_scope('prior'):
-        prior_mean, prior_sample = prior_model()
+        prior_sample, prior_sample_image = prior_model()
     lm.summaries.reset()
     with tf.name_scope('test'):
-        test_posterior_mean, test_error = full_model(fed_input_data)
+        test_reconstruction, test_error = full_model(fed_input_data)
     test_merged = lm.summaries.merge_all_summaries()
 
     saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
@@ -180,7 +168,7 @@ def train():
                     if i % 100 == 99: # Record a summary
                         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                         run_metadata = tf.RunMetadata()
-                        summary, prior_sample_summary, _ = sess.run([training_merged, prior_sample, train_step],
+                        summary, prior_sample_summary, _ = sess.run([training_merged, prior_sample_image, train_step],
                                               feed_dict=feed_dict('train'),
                                               options=run_options,
                                               run_metadata=run_metadata)
@@ -195,11 +183,11 @@ def train():
                 log('done')
         else:
             log('restoring')
-            saver.restore(sess, FLAGS.train_dir + '-90600')# + str(FLAGS.max_steps))
+            saver.restore(sess, FLAGS.train_dir + '-' + str(FLAGS.max_steps))
             fig = plt.figure()
             ax = fig.add_subplot(111)
             def plot_prior(_):
-                prior_means, = sess.run([prior_mean], feed_dict=feed_dict('prior'))
+                prior_means, = sess.run([prior_sample], feed_dict=feed_dict('prior'))
                 plt.cla()
                 ax.plot(prior_means[0, :])
                 plt.draw()
