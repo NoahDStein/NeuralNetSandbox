@@ -1,6 +1,8 @@
 import numpy
 import tensorflow as tf
 
+from better_weighted_moving_average import WeightedMovingAverage
+
 class SummaryAccumulator(object):
     def __init__(self):
         self._summaries = []
@@ -72,15 +74,18 @@ class VariableFactory(object):
                 self.summaries.histogram_summary(summary_name, var)
         return var
 
+
+
 class LayerManager(object):
     def __init__(self):
         self.summaries = SummaryAccumulator()
         self.weight_factory = VariableFactory(init=OrthogonalInit(), summaries=self.summaries)
         self.bias_factory = VariableFactory(init=ConstantInit(0.1), summaries=self.summaries)
         self.scale_factory = VariableFactory(init=ConstantInit(1.0), summaries=self.summaries)
+        self.is_training = True
 
 
-    def nn_layer(self, input_tensor, output_dim, scope, act=tf.nn.relu):
+    def nn_layer(self, input_tensor, output_dim, scope, act=tf.nn.relu, scale=True, bias=True, bn=True):
         """Reusable code for making a simple neural net layer.
         It does a matrix multiply, bias add, and then uses relu to nonlinearize.
         It also sets up name scoping so that the resultant graph is easy to read,
@@ -88,8 +93,7 @@ class LayerManager(object):
         """
         with tf.variable_scope(scope):
             layer_name = tf.get_variable_scope().name
-            biases = self.bias_factory.get_variable('bias', [output_dim])
-            preactivate = biases
+            preactivate = 0.0
             try:
                 num_inputs = len(input_tensor)
             except TypeError:
@@ -97,10 +101,16 @@ class LayerManager(object):
                 input_tensor = [input_tensor]
             for i in xrange(num_inputs):
                 input_dim = input_tensor[i].get_shape().as_list()[1]
-                scale = self.scale_factory.get_variable('scale{}'.format(i), [1])
                 weights = self.weight_factory.get_variable('weight{}'.format(i), [input_dim, output_dim])
-                preactivate = preactivate + scale*tf.matmul(input_tensor[i], weights)
-    
+                preactivate = preactivate + tf.matmul(input_tensor[i], weights)
+            if bn:
+                preactivate = self.batch_normalization(preactivate)
+            if scale:
+                scale_var = self.scale_factory.get_variable('scale{}'.format(i), [1])
+                preactivate = scale_var*preactivate
+            if bias:
+                bias_var = self.bias_factory.get_variable('bias', [output_dim])
+                preactivate = preactivate+bias_var
             self.summaries.histogram_summary(layer_name + '/pre_activations', preactivate)
             activations = act(preactivate)
             try:
@@ -121,3 +131,17 @@ class LayerManager(object):
     def parametrized_sinusoid(self, sig_len, norm_freq, sin_weight, cos_weight):
         arg = tf.linspace(0.0, 2*numpy.pi*(sig_len-1), sig_len)*norm_freq
         return sin_weight*tf.sin(arg) + cos_weight*tf.cos(arg)
+
+    def batch_normalization(self, input_tensor, decay=0.95):
+        mean_val, variance_val = tf.nn.moments(input_tensor, axes=[0])
+        # Using weighted moving average with contant weight amounts to the bias correction that Adam uses for moving averages
+        mean_container = WeightedMovingAverage(mean_val, decay, tf.ones((1,)), collections='BatchNormInternal')
+        variance_container = WeightedMovingAverage(variance_val, decay, tf.ones((1,)), collections='BatchNormInternal')
+        if self.is_training:
+            with tf.control_dependencies([mean_container.average_with_update, variance_container.average_with_update]):
+                mean = tf.identity(mean_val)
+                variance = tf.identity(variance_val)
+        else:
+            mean = mean_container.average
+            variance = variance_container.average
+        return tf.nn.batch_normalization(input_tensor, mean, variance, None, None, 1e-3)
