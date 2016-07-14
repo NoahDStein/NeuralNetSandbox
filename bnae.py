@@ -15,8 +15,8 @@ FLAGS = flags.FLAGS
 flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
 flags.DEFINE_float('learning_rate', 0.01, 'Initial learning rate.')
 flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
-flags.DEFINE_string('summaries_dir', '/tmp/attn_vae/logs', 'Summaries directory')
-flags.DEFINE_string('train_dir', '/tmp/attn_vae/save', 'Saves directory')
+flags.DEFINE_string('summaries_dir', '/tmp/bnae/logs', 'Summaries directory')
+flags.DEFINE_string('train_dir', '/tmp/bnae/save', 'Saves directory')
 
 TRAIN_SIZE = 60000
 TEST_SIZE = 10000
