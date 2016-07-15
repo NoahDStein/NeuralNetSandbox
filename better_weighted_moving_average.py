@@ -76,5 +76,5 @@ class WeightedMovingAverage(object):
                 div = math_ops.truediv
             else:
                 div = math_ops.div
-            self.average_with_update = div(numerator, denominator, name=scope.name)
+            self.average_with_update = div(numerator, denominator+1e-8, name=scope.name)
             self.average = div(value_x_weight_var, weight_var)

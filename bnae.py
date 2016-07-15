@@ -13,7 +13,7 @@ from tfutil import LayerManager
 flags = tf.app.flags
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
-flags.DEFINE_float('learning_rate', 0.01, 'Initial learning rate.')
+flags.DEFINE_float('learning_rate', 0.003, 'Initial learning rate.')
 flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
 flags.DEFINE_string('summaries_dir', '/tmp/bnae/logs', 'Summaries directory')
 flags.DEFINE_string('train_dir', '/tmp/bnae/save', 'Saves directory')
@@ -26,7 +26,7 @@ BATCH_SIZE = 64
 PRIOR_BATCH_SIZE = 5
 TRAIN = True
 
-LATENT_DIM = 8
+LATENT_DIM = 8 # Very sensitive to this value: changing to 20 completely breaks periodicity of prior samples
 NUM_HIDDEN_LAYERS = 3
 HIDDEN_LAYER_SIZE = 200
 
@@ -54,7 +54,7 @@ def train():
         train_data = numpy.zeros((TRAIN_SIZE, SIG_LEN))
     log('done simulating')
 
-    lm = LayerManager()
+    lm = LayerManager(bn_unbias_forward=True)
 
     with tf.name_scope('input'):
         all_train_data_initializer = tf.placeholder(tf.float32, [TRAIN_SIZE, SIG_LEN])
@@ -72,14 +72,14 @@ def train():
     def encoder(data):
         last = data
         for i in xrange(NUM_HIDDEN_LAYERS):
-            last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'encoder/hidden{}'.format(i), act=double_relu)
-        latent = lm.nn_layer(last, LATENT_DIM, 'latent', act=id_act, bias=False, scale=False)
+            last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'encoder/hidden{}'.format(i), act=double_relu, scale=False, bn=True)
+        latent = lm.nn_layer(last, LATENT_DIM, 'latent', act=id_act, bias=False, scale=False, bn=True)
         return latent
 
     def decoder(code):
         last = code
         for i in xrange(NUM_HIDDEN_LAYERS):
-            last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'decoder/hidden{}'.format(i), act=double_relu)
+            last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'decoder/hidden{}'.format(i), act=double_relu, scale=False, bn=True)
         # norm_freq = lm.nn_layer(last, 1, 'decoder/norm_freq', act=tf.nn.sigmoid)
         # output = tf.constant(0.0, dtype=tf.float32)
         # output_log_std = tf.constant(0.0, dtype=tf.float32)
@@ -91,7 +91,7 @@ def train():
         #     cos_weight = lm.nn_layer(last, 1, 'decoder/log_std_cos_weight{}'.format(i))
         #     output_log_std = output_log_std + lm.parametrized_sinusoid(SIG_LEN, 2*norm_freq*i, sin_weight, cos_weight)
         # output_log_std = log_std_act(output_log_std)
-        output = lm.nn_layer(last, SIG_LEN, 'output', act=id_act)
+        output = lm.nn_layer(last, SIG_LEN, 'output', act=id_act, scale=True, bn=True)
         return output
 
     def full_model(data):
@@ -99,7 +99,7 @@ def train():
         output = decoder(latent)
 
         with tf.name_scope('error'):
-            error = tf.reduce_mean(tf.square(data-output))
+            error = tf.reduce_mean(tf.square(data - output))
             lm.summaries.scalar_summary('error', error)
         num_copies = 85
         image = tf.reshape(

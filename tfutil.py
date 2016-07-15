@@ -77,20 +77,18 @@ class VariableFactory(object):
 
 
 class LayerManager(object):
-    def __init__(self):
+    def __init__(self, bn_unbias_forward=False):
         self.summaries = SummaryAccumulator()
         self.weight_factory = VariableFactory(init=OrthogonalInit(), summaries=self.summaries)
         self.bias_factory = VariableFactory(init=ConstantInit(0.1), summaries=self.summaries)
-        self.scale_factory = VariableFactory(init=ConstantInit(1.0), summaries=self.summaries)
+        self.scale_factory = VariableFactory(init=ConstantInit(numpy.log(numpy.exp(1)-1)), summaries=self.summaries)
         self.is_training = True
+        self.bn_unbias_forward = bn_unbias_forward
 
 
-    def nn_layer(self, input_tensor, output_dim, scope, act=tf.nn.relu, scale=True, bias=True, bn=True):
-        """Reusable code for making a simple neural net layer.
-        It does a matrix multiply, bias add, and then uses relu to nonlinearize.
-        It also sets up name scoping so that the resultant graph is easy to read,
-        and adds a number of summary ops.
-        """
+    def nn_layer(self, input_tensor, output_dim, scope, act=tf.nn.relu, scale=None, bias=True, bn=False):
+        if scale is None:
+            scale = bn # scale should default to True for bn and False otherwise
         with tf.variable_scope(scope):
             layer_name = tf.get_variable_scope().name
             preactivate = 0.0
@@ -104,10 +102,10 @@ class LayerManager(object):
                 weights = self.weight_factory.get_variable('weight{}'.format(i), [input_dim, output_dim])
                 preactivate = preactivate + tf.matmul(input_tensor[i], weights)
             if bn:
-                preactivate = self.batch_normalization(preactivate)
+                preactivate = self.batch_normalization(preactivate, layer_name + '/bn')
             if scale:
                 scale_var = self.scale_factory.get_variable('scale{}'.format(i), [1])
-                preactivate = scale_var*preactivate
+                preactivate = tf.nn.softplus(scale_var)*preactivate
             if bias:
                 bias_var = self.bias_factory.get_variable('bias', [output_dim])
                 preactivate = preactivate+bias_var
@@ -132,15 +130,28 @@ class LayerManager(object):
         arg = tf.linspace(0.0, 2*numpy.pi*(sig_len-1), sig_len)*norm_freq
         return sin_weight*tf.sin(arg) + cos_weight*tf.cos(arg)
 
-    def batch_normalization(self, input_tensor, decay=0.95):
+    def batch_normalization(self, input_tensor, name, decay=0.95):
         mean_val, variance_val = tf.nn.moments(input_tensor, axes=[0])
-        # Using weighted moving average with contant weight amounts to the bias correction that Adam uses for moving averages
+        # Using weighted moving average with constant weight amounts to the bias correction that Adam uses for averaging
         mean_container = WeightedMovingAverage(mean_val, decay, tf.ones((1,)), collections='BatchNormInternal')
         variance_container = WeightedMovingAverage(variance_val, decay, tf.ones((1,)), collections='BatchNormInternal')
         if self.is_training:
             with tf.control_dependencies([mean_container.average_with_update, variance_container.average_with_update]):
                 mean = tf.identity(mean_val)
                 variance = tf.identity(variance_val)
+
+            if self.bn_unbias_forward:
+                mean = mean_val + tf.stop_gradient(mean_container.average_with_update - mean_val)
+                # variance = variance_val + tf.stop_gradient(variance_container.average_with_update - variance_val)
+                # variance = variance_val*tf.stop_gradient(variance_container.average_with_update / (variance_val + 1e-3))
+
+            self.summaries.histogram_summary(name + '/mean (running)', mean_container.average)
+            self.summaries.histogram_summary(name + '/mean (batch)', mean_val)
+            self.summaries.histogram_summary(name + '/mean (diff)', mean_val - mean_container.average)
+
+            self.summaries.histogram_summary(name + '/variance (running)', variance_container.average)
+            self.summaries.histogram_summary(name + '/variance (batch)', variance_val)
+            self.summaries.histogram_summary(name + '/variance (diff)', variance_val - variance_container.average)
         else:
             mean = mean_container.average
             variance = variance_container.average
