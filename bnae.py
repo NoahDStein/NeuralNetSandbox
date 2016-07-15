@@ -54,7 +54,7 @@ def train():
         train_data = numpy.zeros((TRAIN_SIZE, SIG_LEN))
     log('done simulating')
 
-    lm = LayerManager(bn_unbias_forward=True)
+    lm = LayerManager(forward_biased_estimate=True)
 
     with tf.name_scope('input'):
         all_train_data_initializer = tf.placeholder(tf.float32, [TRAIN_SIZE, SIG_LEN])

@@ -2,6 +2,7 @@ import numpy
 import tensorflow as tf
 
 from better_weighted_moving_average import WeightedMovingAverage
+from moment_tracker import MomentTracker
 
 class SummaryAccumulator(object):
     def __init__(self):
@@ -77,13 +78,13 @@ class VariableFactory(object):
 
 
 class LayerManager(object):
-    def __init__(self, bn_unbias_forward=False):
+    def __init__(self, forward_biased_estimate=False):
         self.summaries = SummaryAccumulator()
         self.weight_factory = VariableFactory(init=OrthogonalInit(), summaries=self.summaries)
         self.bias_factory = VariableFactory(init=ConstantInit(0.1), summaries=self.summaries)
         self.scale_factory = VariableFactory(init=ConstantInit(numpy.log(numpy.exp(1)-1)), summaries=self.summaries)
         self.is_training = True
-        self.bn_unbias_forward = bn_unbias_forward
+        self.forward_biased_estimate = forward_biased_estimate
 
 
     def nn_layer(self, input_tensor, output_dim, scope, act=tf.nn.relu, scale=None, bias=True, bn=False):
@@ -131,28 +132,27 @@ class LayerManager(object):
         return sin_weight*tf.sin(arg) + cos_weight*tf.cos(arg)
 
     def batch_normalization(self, input_tensor, name, decay=0.95):
-        mean_val, variance_val = tf.nn.moments(input_tensor, axes=[0])
-        # Using weighted moving average with constant weight amounts to the bias correction that Adam uses for averaging
-        mean_container = WeightedMovingAverage(mean_val, decay, tf.ones((1,)), collections='BatchNormInternal')
-        variance_container = WeightedMovingAverage(variance_val, decay, tf.ones((1,)), collections='BatchNormInternal')
+        mt = MomentTracker(input_tensor, decay=decay, collections='BatchNormInternal')
+
         if self.is_training:
-            with tf.control_dependencies([mean_container.average_with_update, variance_container.average_with_update]):
-                mean = tf.identity(mean_val)
-                variance = tf.identity(variance_val)
+            with tf.control_dependencies([mt.update_mean]):
+                mean = tf.identity(mt.batch_mean)
+            with tf.control_dependencies([mt.update_variance]):
+                variance = tf.identity(mt.batch_variance)
 
-            if self.bn_unbias_forward:
-                mean = mean_val + tf.stop_gradient(mean_container.average_with_update - mean_val)
-                # variance = variance_val + tf.stop_gradient(variance_container.average_with_update - variance_val)
-                # variance = variance_val*tf.stop_gradient(variance_container.average_with_update / (variance_val + 1e-3))
+            if self.forward_biased_estimate:
+                mean = mean + tf.stop_gradient(mt.update_mean - mean)
+                #variance = variance + tf.stop_gradient(mt.update_variance - variance)
+                #variance = variance*tf.stop_gradient(mt.tracked_variance / (variance + 1e-3))
 
-            self.summaries.histogram_summary(name + '/mean (running)', mean_container.average)
-            self.summaries.histogram_summary(name + '/mean (batch)', mean_val)
-            self.summaries.histogram_summary(name + '/mean (diff)', mean_val - mean_container.average)
+            self.summaries.histogram_summary(name + '/mean (running)', mt.tracked_mean)
+            self.summaries.histogram_summary(name + '/mean (batch)', mt.batch_mean)
+            self.summaries.histogram_summary(name + '/mean (diff)', mt.batch_mean - mt.tracked_mean)
 
-            self.summaries.histogram_summary(name + '/variance (running)', variance_container.average)
-            self.summaries.histogram_summary(name + '/variance (batch)', variance_val)
-            self.summaries.histogram_summary(name + '/variance (diff)', variance_val - variance_container.average)
+            self.summaries.histogram_summary(name + '/variance (running)', mt.tracked_variance)
+            self.summaries.histogram_summary(name + '/variance (batch)', mt.batch_variance)
+            self.summaries.histogram_summary(name + '/variance (diff)', mt.batch_variance - mt.tracked_variance)
         else:
-            mean = mean_container.average
-            variance = variance_container.average
+            mean = mt.tracked_mean
+            variance = mt.tracked_variance
         return tf.nn.batch_normalization(input_tensor, mean, variance, None, None, 1e-3)
