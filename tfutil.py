@@ -1,7 +1,6 @@
 import numpy
 import tensorflow as tf
 
-from better_weighted_moving_average import WeightedMovingAverage
 from moment_tracker import MomentTracker
 
 class SummaryAccumulator(object):
@@ -87,9 +86,9 @@ class LayerManager(object):
         self.forward_biased_estimate = forward_biased_estimate
 
 
-    def nn_layer(self, input_tensor, output_dim, scope, act=tf.nn.relu, scale=None, bias=True, bn=False):
+    def nn_layer(self, input_tensor, output_dim, scope, act, scale=None, bias=True, bn=False):
         if scale is None:
-            scale = bn # scale should default to True for bn and False otherwise
+            scale = bn  # scale should default to True for bn and False otherwise
         with tf.variable_scope(scope):
             layer_name = tf.get_variable_scope().name
             preactivate = 0.0
@@ -131,9 +130,8 @@ class LayerManager(object):
         arg = tf.linspace(0.0, 2*numpy.pi*(sig_len-1), sig_len)*norm_freq
         return sin_weight*tf.sin(arg) + cos_weight*tf.cos(arg)
 
-    def batch_normalization(self, input_tensor, name, decay=0.95):
-        mt = MomentTracker(input_tensor, decay=decay, collections='BatchNormInternal')
-
+    def batch_normalization(self, input_tensor, name, decay=0.95, normalization_indices=None):
+        mt = MomentTracker(input_tensor, decay=decay, collections='BatchNormInternal', reduction_indices=normalization_indices or [0])
         if self.is_training:
             with tf.control_dependencies([mt.update_mean]):
                 mean = tf.identity(mt.batch_mean)

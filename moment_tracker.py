@@ -25,46 +25,46 @@ from tensorflow.python.training.moving_averages import assign_moving_average
 # Using weighted moving average with constant weight amounts to the bias correction that Adam uses for averaging
 class MomentTracker(object):
     def __init__(self, value, decay,
-                            truediv=True,
-                            collections=None,
-                            name=None):
+                 truediv=True,
+                 collections=None,
+                 reduction_indices=None,
+                 name=None):
         self.value = value
-        self.update_mean = None
-        self.update_variance = None
+        self.reduction_indices = reduction_indices or [0]
 
         eps = 1e-8
-
-        shape = value.get_shape().as_list()[1:]
-
+        if truediv:
+            div = math_ops.truediv
+        else:
+            div = math_ops.div
         if collections is None:
             collections = [ops.GraphKeys.VARIABLES]
+
+        value_shape = value.get_shape().as_list()
+        shape = []
+        for dim in xrange(len(value_shape)):
+            if dim in self.reduction_indices:
+                shape.append(1)
+            else:
+                shape.append(value_shape[dim])
+
         with variable_scope.variable_op_scope(
                 [value, decay], name, "MomentTracker") as scope:
 
-            mean_x_weight_var = variable_scope.get_variable(
-                "mean_x_weight",
-                initializer=init_ops.zeros_initializer(shape, dtype=value.dtype),
-                trainable=False,
-                collections=collections)
-            variance_x_weight_var = variable_scope.get_variable(
-                "variance_x_weight",
-                initializer=init_ops.zeros_initializer(shape, dtype=value.dtype),
-                trainable=False,
-                collections=collections)
-            weight_var = variable_scope.get_variable(
-                "weight",
-                initializer=init_ops.zeros_initializer([1], dtype=tf.float32),
-                trainable=False,
-                collections=collections)
+            mean_x_weight_var = variable_scope.get_variable("mean_x_weight", trainable=False, collections=collections,
+                initializer=init_ops.zeros_initializer(shape, dtype=value.dtype))
 
-            if truediv:
-                div = math_ops.truediv
-            else:
-                div = math_ops.div
+            variance_x_weight_var = variable_scope.get_variable("variance_x_weight", trainable=False,
+                collections=collections, initializer=init_ops.zeros_initializer(shape, dtype=value.dtype))
+
+            weight_var = variable_scope.get_variable("weight", trainable=False, collections=collections,
+                initializer=init_ops.zeros_initializer([1], dtype=tf.float32))
+
             self.tracked_mean = div(mean_x_weight_var, weight_var + eps)
             self.tracked_variance = div(variance_x_weight_var, weight_var + eps)
 
-            self.batch_mean, self.batch_variance = tf.nn.moments(self.value, axes=[0], shift=self.tracked_mean)
+            self.batch_mean, self.batch_variance = tf.nn.moments(self.value, axes=self.reduction_indices,
+                                                                 shift=self.tracked_mean, keep_dims=True)
 
             mean_numerator = assign_moving_average(mean_x_weight_var, self.batch_mean, decay)
             variance_numerator = assign_moving_average(variance_x_weight_var, self.batch_variance, decay)
