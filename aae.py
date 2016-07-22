@@ -95,14 +95,15 @@ def train():
 
     def discriminator(latent):
         last = latent
-        for i in xrange(NUM_HIDDEN_LAYERS):
-            last = lm_disc.nn_layer(last, HIDDEN_LAYER_SIZE, 'discriminator/hidden{}'.format(i), act=double_relu)
+        for i in xrange(1):
+            last = lm_disc.nn_layer(last, 20, 'discriminator/hidden{}'.format(i), act=double_relu)
         output_logit = lm_disc.nn_layer(last, 1, 'discrimator/prediction', act=id_act)
         return output_logit
 
     def full_model(data):
         latent_mean, latent_log_std = encoder(data)
-        latent_sample = lm_ae.reparam_normal_sample(latent_mean, latent_log_std, 'sample')
+        #latent_sample = lm_ae.reparam_normal_sample(latent_mean, latent_log_std, 'sample')
+        latent_sample = latent_mean
         output_mean, output_log_std = decoder(latent_sample)
         disc_neg_logit = discriminator(latent_sample)
         tf.get_variable_scope().reuse_variables()
@@ -151,8 +152,10 @@ def train():
     learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, batch, 5000, 0.8, staircase=True)
 
     pretrain_step = tf.train.AdamOptimizer(0.03).minimize(rough_error, var_list=lm_ae.scale_factory.variables)
-    ae_train_step = tf.train.AdamOptimizer(learning_rate).minimize(-10000.0*disc_cross_entropy - reconstruction_error, global_step=batch, var_list=lm_ae.weight_factory.variables + lm_ae.bias_factory.variables)
-    disc_train_step = tf.train.AdamOptimizer(learning_rate).minimize(disc_cross_entropy, global_step=batch, var_list=lm_disc.weight_factory.variables + lm_disc.bias_factory.variables)
+    ae_train_step = tf.train.AdamOptimizer(learning_rate).minimize(-reconstruction_error, global_step=batch, var_list=lm_ae.weight_factory.variables + lm_ae.bias_factory.variables)
+    ae_fool_disc_train_step = tf.train.AdamOptimizer(learning_rate/3.0).minimize(-disc_cross_entropy, global_step=batch, var_list=lm_ae.weight_factory.variables + lm_ae.bias_factory.variables)
+
+    disc_train_step = tf.train.AdamOptimizer(learning_rate/3.0).minimize(disc_cross_entropy, global_step=batch, var_list=lm_disc.weight_factory.variables + lm_disc.bias_factory.variables)
 
     def feed_dict(mode):
         """Make a TensorFlow feed_dict: maps data onto Tensor placeholders."""
@@ -160,6 +163,13 @@ def train():
             return {fed_input_data: test_data}
         else:
             return {}
+
+    def validate(i, write_summary=True):
+        summary, ce, re = sess.run([test_merged, test_dist_cross_entropy, test_reconstruction_error],
+                                   feed_dict=feed_dict('test'))
+        log('batch %s: Test set cross entropy = %s, test set reconstruction error = %s' % (i, ce, re))
+        if write_summary:
+            test_writer.add_summary(summary, i)
 
     with tf.Session() as sess:
         sess.run(tf.initialize_all_variables())
@@ -178,15 +188,26 @@ def train():
                     for i in xrange(3000):
                         err, _ = sess.run([rough_error, pretrain_step], feed_dict=feed_dict('train'))
                         if i % 100 == 99:
-                            log('batch %s: Single training batch rough error = %s' % (i, err))
+                            log('batch %s: single training batch rough error = %s' % (i, err))
+                #validate(0, write_summary=False)
+                log('initializing ae')
+                for i in xrange(5000):
+                    re, _ = sess.run([reconstruction_error, ae_train_step], feed_dict=feed_dict('train'))
+                    if i % 1000 == 999:
+                        log('batch %s: single training batch reconstruction error = %s' % (i, re))
+                # #validate(0, write_summary=False)
+                # log('initializing discriminator')
+                # for i in xrange(5000):
+                #     ce, _ = sess.run([disc_cross_entropy, disc_train_step], feed_dict('train'))
+                #     if i % 1000 == 999:
+                #         log('batch %s: single training batch cross entropy = %s' % (i, ce))
+                #validate(0, write_summary=False)
                 log('starting training')
                 for i in xrange(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
-                        summary, ce, re = sess.run([test_merged, test_dist_cross_entropy, test_reconstruction_error], feed_dict=feed_dict('test'))
-                        test_writer.add_summary(summary, i)
-                        log('batch %s: Test set cross entropy = %s, test set reconstruction error = %s' % (i, ce, re))
-                    if i % 100 == 0:
-                        sess.run([disc_train_step], feed_dict('train'))
+                        validate(i)
+                    # if i % 10 == 0:
+                    #     sess.run([disc_train_step], feed_dict('train'))
                     if i % 100 == 99: # Record a summary
                         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                         run_metadata = tf.RunMetadata()
@@ -198,8 +219,10 @@ def train():
                         train_writer.add_summary(prior_sample_summary, i)
                         train_writer.add_run_metadata(run_metadata, 'batch%d' % i)
                     else:
-                        sess.run([ae_train_step], feed_dict=feed_dict('train'))
-
+                        # sess.run([disc_train_step], feed_dict=feed_dict('train'))
+                        # sess.run([ae_fool_disc_train_step], feed_dict=feed_dict('train'))
+                        # sess.run([ae_train_step], feed_dict=feed_dict('train'))
+                        sess.run([ae_train_step, ae_fool_disc_train_step, disc_train_step], feed_dict=feed_dict('train'))
 
             finally:
                 log('saving')

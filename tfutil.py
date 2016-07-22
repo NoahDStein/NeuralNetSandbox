@@ -3,6 +3,14 @@ import tensorflow as tf
 
 from moment_tracker import MomentTracker
 
+def listify(x):
+    try:
+        len(x)
+    except TypeError:
+        return [x]
+    return x
+
+
 class SummaryAccumulator(object):
     def __init__(self):
         self._summaries = []
@@ -39,6 +47,14 @@ class ConstantInit(object):
 
     def __call__(self, shape):
         return tf.constant(self.constant, shape=shape, dtype=tf.float32)
+
+
+class RandomInit(object):
+    def __init__(self, lim):
+        self.lim = lim
+
+    def __call__(self, shape):
+        return tf.truncated_normal(shape, stddev=self.lim)
 
 class OrthogonalInit(object):
     def __call__(self, shape):
@@ -80,7 +96,8 @@ class LayerManager(object):
     def __init__(self, forward_biased_estimate=False):
         self.summaries = SummaryAccumulator()
         self.weight_factory = VariableFactory(init=OrthogonalInit(), summaries=self.summaries)
-        self.bias_factory = VariableFactory(init=ConstantInit(0.1), summaries=self.summaries)
+        self.filter_factory = VariableFactory(init=RandomInit(0.1), summaries=self.summaries)
+        self.bias_factory = VariableFactory(init=ConstantInit(0.0), summaries=self.summaries)
         self.scale_factory = VariableFactory(init=ConstantInit(numpy.log(numpy.exp(1)-1)), summaries=self.summaries)
         self.is_training = True
         self.forward_biased_estimate = forward_biased_estimate
@@ -92,12 +109,8 @@ class LayerManager(object):
         with tf.variable_scope(scope):
             layer_name = tf.get_variable_scope().name
             preactivate = 0.0
-            try:
-                num_inputs = len(input_tensor)
-            except TypeError:
-                num_inputs = 1
-                input_tensor = [input_tensor]
-            for i in xrange(num_inputs):
+            input_tensor = listify(input_tensor)
+            for i in xrange(len(input_tensor)):
                 input_dim = input_tensor[i].get_shape().as_list()[1]
                 weights = self.weight_factory.get_variable('weight{}'.format(i), [input_dim, output_dim])
                 preactivate = preactivate + tf.matmul(input_tensor[i], weights)
@@ -117,6 +130,40 @@ class LayerManager(object):
             except TypeError:
                 self.summaries.histogram_summary(layer_name + '/activations', activations)
             return activations
+
+
+    def conv_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, scale=None, bias=True, bn=False):
+        if scale is None:
+            scale = bn  # scale should default to True for bn and False otherwise
+        with tf.variable_scope(scope):
+            layer_name = tf.get_variable_scope().name
+            preactivate = 0.0
+            input_tensor = listify(input_tensor)
+            for i in xrange(len(input_tensor)):
+                num_channels_in = input_tensor[i].get_shape().as_list()[3]
+                filters = self.filter_factory.get_variable('filter{}'.format(i), [filter_height, filter_width, num_channels_in, num_filters])
+                preactivate = preactivate + tf.nn.conv2d(input_tensor[i], filters, strides=[1, 1, 1, 1], padding='SAME')
+            if bn:
+                preactivate = self.batch_normalization(preactivate, layer_name + '/bn', normalization_indices=[0, 1, 2])
+            if scale:
+                scale_var = self.scale_factory.get_variable('scale{}'.format(i), [1])
+                preactivate = tf.nn.softplus(scale_var)*preactivate
+            if bias:
+                bias_var = self.bias_factory.get_variable('bias', [num_filters])
+                preactivate = preactivate+bias_var
+            self.summaries.histogram_summary(layer_name + '/pre_activations', preactivate)
+            activations = act(preactivate)
+            try:
+                for i in xrange(len(activations)):
+                    self.summaries.histogram_summary(layer_name + '/activations{}'.format(i), activations[i])
+            except TypeError:
+                self.summaries.histogram_summary(layer_name + '/activations', activations)
+            return activations
+
+    def max_pool(self, value, *args, **kwargs):
+        return tf.reduce_max(
+            [tf.nn.max_pool(t, *args, **kwargs) for t in listify(value)],
+            reduction_indices=[0])
 
     def reparam_normal_sample(self, mean, log_std, layer_name):
         with tf.name_scope(layer_name):
