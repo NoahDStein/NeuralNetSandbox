@@ -41,7 +41,7 @@ from tfutil import LayerManager, listify
 flags = tf.app.flags
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
-flags.DEFINE_float('learning_rate', 0.0003, 'Initial learning rate.')
+flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
 flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
 flags.DEFINE_string('summaries_dir', '/tmp/mnist/logs', 'Summaries directory')
 flags.DEFINE_string('train_dir', '/tmp/mnist/save', 'Saves directory')
@@ -56,9 +56,9 @@ PRIOR_BATCH_SIZE = 10
 TRAIN = True
 BNAE = False
 CONV = False
-LATENT_DIM = 100
-NUM_HIDDEN_LAYERS = 3
-HIDDEN_LAYER_SIZE = 300
+LATENT_DIM = 20
+NUM_HIDDEN_LAYERS = 2
+HIDDEN_LAYER_SIZE = 500
 
 if CONV:
     small_image_size = IMAGE_SIZE // 4
@@ -147,14 +147,14 @@ def train():
             last = [tf.image.resize_images(val, IMAGE_SIZE, IMAGE_SIZE) for val in listify(last)]
             last = lm.conv_layer(last, 3, 3, 8, 'decoder/hidden/conv4', act=default_act, **do_bn)
             last = lm.conv_layer(last, 3, 3, 8, 'decoder/hidden/conv5', act=default_act, **do_bn)
-            output_mean = lm.conv_layer(last, 3, 3, 1, 'output/mean', act=tf.nn.sigmoid, **do_bn)
+            output_mean_logit = lm.conv_layer(last, 3, 3, 1, 'output/mean', act=id_act, **do_bn)
             output_log_std = lm.conv_layer(last, 3, 3, 1, 'output/log_std', act=log_std_act, **do_bn)
-            output_mean = tf.reshape(output_mean, [-1, IMAGE_SIZE*IMAGE_SIZE])
+            output_mean_logit = tf.reshape(output_mean_logit, [-1, IMAGE_SIZE*IMAGE_SIZE])
             output_log_std = tf.reshape(output_log_std, [-1, IMAGE_SIZE*IMAGE_SIZE])
         else:
-            output_mean = lm.nn_layer(last, IMAGE_SIZE*IMAGE_SIZE, 'output/mean', act=tf.nn.sigmoid, **do_bn)
+            output_mean_logit = lm.nn_layer(last, IMAGE_SIZE*IMAGE_SIZE, 'output/mean', act=id_act, **do_bn)
             output_log_std = lm.nn_layer(last, IMAGE_SIZE*IMAGE_SIZE, 'output/log_std', act=log_std_act, **do_bn)
-        return output_mean, output_log_std
+        return output_mean_logit, output_log_std
 
     def full_model(data):
         latent_mean, latent_log_std = encoder(data)
@@ -163,24 +163,29 @@ def train():
         else:
             latent = lm.reparam_normal_sample(latent_mean, latent_log_std, 'latent/sample')
         #latent = clip_rows_by_norm(latent, numpy.sqrt(LATENT_DIM + 4.0*numpy.sqrt(2.0*LATENT_DIM)))
-        output_mean, output_log_std = decoder(latent)
+        output_mean_logit, output_log_std = decoder(latent)
+        output_mean = tf.nn.sigmoid(output_mean_logit)
 
         with tf.name_scope('likelihood_bound'):
             minus_kl = 0.5 * tf.reduce_sum(
                 1.0 + 2.0 * latent_log_std - tf.square(latent_mean) - tf.exp(2.0 * latent_log_std),
                 reduction_indices=[1])
             # Normal
-            reconstruction_error = tf.reduce_sum(
-                -0.5 * numpy.log(2 * numpy.pi) - output_log_std - 0.5 * tf.square(output_mean - data) / tf.exp(
-                    2.0 * output_log_std), reduction_indices=[1])
+            # reconstruction_error = tf.reduce_sum(
+            #     -0.5 * numpy.log(2 * numpy.pi) - output_log_std - 0.5 * tf.square(output_mean - data) / tf.exp(
+            #         2.0 * output_log_std), reduction_indices=[1])
+
             # Laplace
             # reconstruction_error = tf.reduce_sum(-numpy.log(2.0) - output_log_std - abs(output_mean-data)/tf.exp(output_log_std), reduction_indices=[1])
+
+            # Cross Entropy
+            reconstruction_error = -tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(output_mean_logit, data), reduction_indices=[1])
 
         with tf.name_scope('total'):
             likelihood_bound = tf.reduce_mean(minus_kl + reconstruction_error)
             lm.summaries.scalar_summary('likelihood bound', tf.nn.relu(
                 likelihood_bound))  # Easier to parse graphs if giant negative values of first few iterations are omitted
-            likelihood_bound = tf.reduce_mean(tf.clip_by_value(tf.cast(batch, tf.float32)/10000.0 - 2.0, 0.0, 1.0)*minus_kl + reconstruction_error)
+            # likelihood_bound = tf.reduce_mean(tf.clip_by_value(tf.cast(batch, tf.float32)/10000.0 - 2.0, 0.0, 1.0)*minus_kl + reconstruction_error)
 
         with tf.name_scope('error'):
             squared_error = tf.reduce_mean(tf.square(data - output_mean))
@@ -223,7 +228,8 @@ def train():
 
     def prior_model():
         latent = tf.random_normal((PRIOR_BATCH_SIZE, LATENT_DIM))
-        output_mean, output_log_std = decoder(latent)
+        output_mean_logit, output_log_std = decoder(latent)
+        output_mean = tf.nn.sigmoid(output_mean_logit)
 
         sample_image = lm.summaries.image_summary('prior/mean', tf.reshape(output_mean, [-1, IMAGE_SIZE, IMAGE_SIZE, 1]), 10)
         return output_mean, output_log_std, sample_image
