@@ -1,3 +1,5 @@
+import time
+import os
 import numpy
 import tensorflow as tf
 
@@ -201,3 +203,17 @@ class LayerManager(object):
             mean = mt.tracked_mean
             variance = mt.tracked_variance
         return tf.nn.batch_normalization(input_tensor, mean, variance, None, None, 1e-3)
+
+
+def log(s):
+    print('[%s] ' % time.asctime() + s)
+
+
+def restore_latest(saver, sess, path):
+    dated_files = [(os.path.getmtime(path + '/' + fn), os.path.basename(fn)) for fn in os.listdir(path) if
+                   fn.startswith('save') and os.path.splitext(fn)[1] == '']
+    dated_files.sort()
+    dated_files.reverse()
+    newest = dated_files[0][1]
+    log('restoring %s updated at %s' % (dated_files[0][1], time.ctime(dated_files[0][0])))
+    saver.restore(sess, path + '/' + newest)

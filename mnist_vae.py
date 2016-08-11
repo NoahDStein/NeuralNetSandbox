@@ -22,8 +22,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import time
-import os
 import matplotlib.pyplot as plt
 import numpy
 import scipy.stats
@@ -36,22 +34,23 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import constant_op
 from tensorflow.python.ops import math_ops
 
-from tfutil import LayerManager, listify
+from tfutil import LayerManager, listify, log, restore_latest
+from mnist_basic import classifier
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
 flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
 flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
-flags.DEFINE_string('summaries_dir', '/tmp/mnist/logs', 'Summaries directory')
-flags.DEFINE_string('train_dir', '/tmp/mnist/save', 'Saves directory')
+flags.DEFINE_string('summaries_dir', '/tmp/mnist_vae/logs', 'Summaries directory')
+flags.DEFINE_string('train_dir', '/tmp/mnist_vae/save', 'Saves directory')
 
 SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
 IMAGE_SIZE = 28
 IMAGE_AREA = IMAGE_SIZE*IMAGE_SIZE
 SEED = 66478  # Set to None for random seed.
 BATCH_SIZE = 64
-PRIOR_BATCH_SIZE = 10
+PRIOR_BATCH_SIZE = 10000
 
 TRAIN = True
 BNAE = False
@@ -64,9 +63,6 @@ if CONV:
     small_image_size = IMAGE_SIZE // 4
     small_image_area = small_image_size * small_image_size
     HIDDEN_LAYER_SIZE = (HIDDEN_LAYER_SIZE // small_image_area) * small_image_area
-
-def log(s):
-    print('[%s] ' % time.asctime() + s)
 
 # Adapted from tf's clip_ops.py, so this probably inherits the Apache license
 def clip_rows_by_norm(t, clip_norm, name=None):
@@ -89,6 +85,7 @@ def train():
     TRAIN_SIZE=mnist.train.images.shape[0]
 
     lm = LayerManager(forward_biased_estimate=False)
+    lm_classifier = LayerManager(forward_biased_estimate=False)
     batch = tf.Variable(0)
 
     with tf.name_scope('input'):
@@ -102,7 +99,7 @@ def train():
         return z
 
     def log_std_act(z):
-        return tf.clip_by_value(z, -2.0, 2.0)
+        return tf.clip_by_value(z, -5.0, 5.0)
 
     def double_relu(z):
         return [tf.nn.relu(z), tf.nn.relu(-z)]
@@ -183,8 +180,7 @@ def train():
 
         with tf.name_scope('total'):
             likelihood_bound = tf.reduce_mean(minus_kl + reconstruction_error)
-            lm.summaries.scalar_summary('likelihood bound', tf.nn.relu(
-                likelihood_bound))  # Easier to parse graphs if giant negative values of first few iterations are omitted
+            lm.summaries.scalar_summary('likelihood bound', likelihood_bound)  # Easier to parse graphs if giant negative values of first few iterations are omitted
             # likelihood_bound = tf.reduce_mean(tf.clip_by_value(tf.cast(batch, tf.float32)/10000.0 - 2.0, 0.0, 1.0)*minus_kl + reconstruction_error)
 
         with tf.name_scope('error'):
@@ -205,7 +201,7 @@ def train():
 
             #ind_err = tf.squeeze(tf.matmul(tf.nn.softmax(0.1*abs(stein_lemma_err)), tf.square(stein_lemma_err), transpose_b=True))
 
-            ind_err = tf.reduce_mean(tf.square(stein_lemma_err))
+            ind_err = tf.sqrt(tf.cast(tf.shape(latent)[0], tf.float32)) * tf.reduce_mean(tf.square(stein_lemma_err))
 
             # nonlin = tf.nn.relu(tf.sign(tf.random_normal((LATENT_DIM,)))*latent - tf.random_normal((LATENT_DIM,)))
             # nonlin_mean = tf.reduce_mean(nonlin, reduction_indices=[0], keep_dims=True)
@@ -223,7 +219,7 @@ def train():
         if BNAE:
             error = squared_error + ind_err
         else:
-            error = -likelihood_bound  # + 1000.0*ind_err
+            error = -likelihood_bound + ind_err
         return output_mean, output_log_std, error
 
     def prior_model():
@@ -233,6 +229,11 @@ def train():
 
         sample_image = lm.summaries.image_summary('prior/mean', tf.reshape(output_mean, [-1, IMAGE_SIZE, IMAGE_SIZE, 1]), 10)
         return output_mean, output_log_std, sample_image
+
+
+    classifier_logits = classifier(lm_classifier, fed_input_data)
+
+    classifier_saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
 
     with tf.name_scope('posterior'):
         reconstruction, _, error = full_model(training_batch)
@@ -264,6 +265,8 @@ def train():
         sess.run(all_train_data.initializer, feed_dict={all_train_data_initializer: mnist.train.images})
         sess.run(tf.initialize_variables(tf.get_collection('BatchNormInternal')))
 
+        restore_latest(classifier_saver, sess, '/tmp/mnist_basic')
+
         coord = tf.train.Coordinator()
         threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
@@ -274,9 +277,22 @@ def train():
                 log('starting training')
                 for i in xrange(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
-                        summary, err = sess.run([test_merged, test_error], feed_dict=feed_dict('test'))
+                        summary, err, prior_sample_data = sess.run([test_merged, test_error, prior_sample], feed_dict=feed_dict('test'))
                         test_writer.add_summary(summary, i)
-                        log('batch %s: Test error = %s' % (i, err))
+
+
+                        NUM_RUNS = 100
+                        runs = []
+                        for _ in xrange(NUM_RUNS):
+                            new_output_probs, = sess.run([classifier_logits], feed_dict={fed_input_data: prior_sample_data})
+                            new_output = numpy.argmax(new_output_probs, 1)
+                            runs.append(new_output)
+
+                        all_runs = numpy.vstack(runs).T
+                        ave_entropy = numpy.mean([scipy.stats.entropy(numpy.bincount(row), base=2.0) for row in all_runs])
+
+
+                        log('batch %s: Test error = %s, Average prediction entropy = %.4f bits' % (i, err, ave_entropy))
                     if i % 100 == 99: # Record a summary
                         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                         run_metadata = tf.RunMetadata()
@@ -296,12 +312,7 @@ def train():
         else:
             # Visualization code, nothing to do with training
 
-            dated_files = [(os.path.getmtime('/tmp/mnist/' + fn), os.path.basename(fn)) for fn in os.listdir('/tmp/mnist') if fn.startswith('save') and os.path.splitext(fn)[1] == '']
-            dated_files.sort()
-            dated_files.reverse()
-            newest = dated_files[0][1]
-            log('restoring %s updated at %s' % (dated_files[0][1], time.ctime(dated_files[0][0])))
-            saver.restore(sess, '/tmp/mnist/' + newest)
+            restore_latest(saver, sess, '/tmp/mnist_vae')
             latent, latent_log_std = encoder(fed_input_data)
             #latent = lm.reparam_normal_sample(latent_mean, latent_log_std, 'latent/sample')
             latents, = sess.run([latent], feed_dict={fed_input_data: mnist.train.images})
