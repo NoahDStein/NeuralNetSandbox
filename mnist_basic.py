@@ -99,14 +99,6 @@ def full_model(lm, data, labels):
     return output_probs, cross_entropy, percent_error
 
 def train():
-    flags = tf.app.flags
-    FLAGS = flags.FLAGS
-    flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
-    flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
-    flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
-    flags.DEFINE_string('summaries_dir', '/tmp/mnist_basic/logs', 'Summaries directory')
-    flags.DEFINE_string('train_dir', '/tmp/mnist_basic/save', 'Saves directory')
-
     log('loading MNIST')
     # Import data
     mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=False)
@@ -165,6 +157,8 @@ def train():
                     if i % 1000 == 999: # Do test set
                         summary, err = sess.run([test_merged, test_percent_error], feed_dict=feed_dict('test'))
                         test_writer.add_summary(summary, i)
+                        log('batch %s: Test classification error = %s%%' % (i, err))
+                    if i % 5000 == 4999:
                         NUM_RUNS = 100
                         runs = []
                         for _ in xrange(NUM_RUNS):
@@ -174,7 +168,7 @@ def train():
 
                         all_runs = numpy.vstack(runs).T
                         ave_entropy = numpy.mean([scipy.stats.entropy(numpy.bincount(row), base=2.0) for row in all_runs])
-                        log('batch %s: Test classification error = %s%%, Average entropy = %.4f bits' % (i, err, ave_entropy))
+                        log('batch %s: Average entropy = %.4f bits' % (i, ave_entropy))
                     if i % 100 == 99: # Record a summary
                         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                         run_metadata = tf.RunMetadata()
@@ -202,4 +196,12 @@ def main(_):
     train()
 
 if __name__ == '__main__':
+    flags = tf.app.flags
+    FLAGS = flags.FLAGS
+    flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
+    flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
+    flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
+    flags.DEFINE_string('summaries_dir', '/tmp/mnist_basic/logs', 'Summaries directory')
+    flags.DEFINE_string('train_dir', '/tmp/mnist_basic/save', 'Saves directory')
+
     tf.app.run()

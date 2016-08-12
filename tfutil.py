@@ -77,7 +77,11 @@ class VariableFactory(object):
         self.summaries = summaries
 
     def get_variable(self, name, shape, *args, **kwargs):
-        var = tf.get_variable(name, *args, initializer=self.init(shape), **kwargs)
+        try:
+            var = tf.get_variable(name, *args, initializer=self.init(shape), **kwargs)
+        except TypeError:
+            var = tf.get_variable(name, *args, **kwargs)
+
         self.variables.append(var)
         if self.summaries is not None and not tf.get_variable_scope().reuse:
             summary_name = tf.get_variable_scope().name + '/' + name

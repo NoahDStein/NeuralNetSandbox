@@ -50,7 +50,8 @@ IMAGE_SIZE = 28
 IMAGE_AREA = IMAGE_SIZE*IMAGE_SIZE
 SEED = 66478  # Set to None for random seed.
 BATCH_SIZE = 64
-PRIOR_BATCH_SIZE = 10000
+PRIOR_BATCH_SIZE = 10
+NUM_RUNS_FOR_ENTROPY_ESTIMATES = 100
 
 TRAIN = True
 BNAE = False
@@ -87,6 +88,8 @@ def train():
     lm = LayerManager(forward_biased_estimate=False)
     lm_classifier = LayerManager(forward_biased_estimate=False)
     batch = tf.Variable(0)
+
+    prior_batch_size = tf.placeholder(tf.int64, [])
 
     with tf.name_scope('input'):
         all_train_data_initializer = tf.placeholder(tf.float32, [TRAIN_SIZE, IMAGE_AREA])
@@ -223,7 +226,7 @@ def train():
         return output_mean, output_log_std, error
 
     def prior_model():
-        latent = tf.random_normal((PRIOR_BATCH_SIZE, LATENT_DIM))
+        latent = tf.random_normal((prior_batch_size, LATENT_DIM))
         output_mean_logit, output_log_std = decoder(latent)
         output_mean = tf.nn.sigmoid(output_mean_logit)
 
@@ -233,7 +236,7 @@ def train():
 
     classifier_logits = classifier(lm_classifier, fed_input_data)
 
-    classifier_saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
+    classifier_saver = tf.train.Saver([var for var in tf.trainable_variables() + tf.get_collection('BatchNormInternal') if var != batch])
 
     with tf.name_scope('posterior'):
         reconstruction, _, error = full_model(training_batch)
@@ -245,7 +248,7 @@ def train():
     lm.summaries.reset()
     with tf.name_scope('test'):
         test_reconstruction, _, test_error = full_model(fed_input_data)
-    test_merged = lm.summaries.merge_all_summaries()
+    test_merged = lm.summaries.merge_all_summaries() + lm_classifier.summaries.merge_all_summaries()
 
     saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
 
@@ -256,34 +259,49 @@ def train():
     def feed_dict(mode):
         """Make a TensorFlow feed_dict: maps data onto Tensor placeholders."""
         if mode == 'test':
-            return {fed_input_data: mnist.test.images}
+            return {fed_input_data: mnist.test.images, prior_batch_size: 10000}
         else:
-            return {}
+            return {prior_batch_size: PRIOR_BATCH_SIZE}
 
     with tf.Session() as sess:
+        train_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/train', sess.graph)
+        test_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/test')
+
         sess.run(tf.initialize_all_variables())
         sess.run(all_train_data.initializer, feed_dict={all_train_data_initializer: mnist.train.images})
         sess.run(tf.initialize_variables(tf.get_collection('BatchNormInternal')))
 
-        restore_latest(classifier_saver, sess, '/tmp/mnist_basic')
-
         coord = tf.train.Coordinator()
         threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
+        restore_latest(classifier_saver, sess, '/tmp/mnist_basic')
+
+        runs = []
+        for _ in xrange(NUM_RUNS_FOR_ENTROPY_ESTIMATES):
+            new_output_probs, = sess.run([classifier_logits], feed_dict=feed_dict('test'))
+            new_output = numpy.argmax(new_output_probs, 1)
+            runs.append(new_output)
+
+        all_runs = numpy.vstack(runs).T
+        ave_entropy = numpy.mean([scipy.stats.entropy(numpy.bincount(row), base=2.0) for row in all_runs])
+        log('Average prediction entropy on test data = %.4f bits' % ave_entropy)
+
+
         if TRAIN:
-            train_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/train', sess.graph)
-            test_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/test')
+
             try:
                 log('starting training')
                 for i in xrange(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
-                        summary, err, prior_sample_data = sess.run([test_merged, test_error, prior_sample], feed_dict=feed_dict('test'))
+                        summary, err = sess.run([test_merged, test_error], feed_dict=feed_dict('test'))
                         test_writer.add_summary(summary, i)
 
+                        log('batch %s: Test error = %s' % (i, err))
+                    if i % 5000 == 4999:
+                        prior_sample_data, = sess.run([prior_sample], feed_dict=feed_dict('test'))
 
-                        NUM_RUNS = 100
                         runs = []
-                        for _ in xrange(NUM_RUNS):
+                        for _ in xrange(NUM_RUNS_FOR_ENTROPY_ESTIMATES):
                             new_output_probs, = sess.run([classifier_logits], feed_dict={fed_input_data: prior_sample_data})
                             new_output = numpy.argmax(new_output_probs, 1)
                             runs.append(new_output)
@@ -291,8 +309,8 @@ def train():
                         all_runs = numpy.vstack(runs).T
                         ave_entropy = numpy.mean([scipy.stats.entropy(numpy.bincount(row), base=2.0) for row in all_runs])
 
+                        log('batch %s: Average prediction entropy on prior samples = %.4f bits' % (i, ave_entropy))
 
-                        log('batch %s: Test error = %s, Average prediction entropy = %.4f bits' % (i, err, ave_entropy))
                     if i % 100 == 99: # Record a summary
                         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                         run_metadata = tf.RunMetadata()
