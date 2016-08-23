@@ -99,13 +99,13 @@ class VariableFactory(object):
 
 
 class LayerManager(object):
-    def __init__(self, forward_biased_estimate=False):
+    def __init__(self, forward_biased_estimate=False, is_training=True):
         self.summaries = SummaryAccumulator()
         self.weight_factory = VariableFactory(init=OrthogonalInit(), summaries=self.summaries)
         self.filter_factory = VariableFactory(init=RandomInit(0.1), summaries=self.summaries)
         self.bias_factory = VariableFactory(init=ConstantInit(0.0), summaries=self.summaries)
         self.scale_factory = VariableFactory(init=ConstantInit(numpy.log(numpy.exp(1)-1)), summaries=self.summaries)
-        self.is_training = True
+        self.is_training = is_training
         self.forward_biased_estimate = forward_biased_estimate
 
 
