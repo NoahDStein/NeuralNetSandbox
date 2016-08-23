@@ -61,28 +61,9 @@ def double_relu(z):
 default_act = tf.nn.relu  # double_relu
 do_bn = dict(bn=False)
 
-def factorizer(lm, data):
-    last = data - 0.5
-    randomness = tf.random_normal(tf.shape(data))[:,:10] # Stupid hack
-    for i in xrange(NUM_HIDDEN_LAYERS):
-        last = [last, randomness]
-        last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'factorizer/hidden/fc{}'.format(i), act=default_act, **do_bn)
-    a = lm.nn_layer(last, ROWS*POSRANK, 'factorizer/output/a', act=tf.nn.relu)
-    b = lm.nn_layer(last, POSRANK*COLS, 'factorizer/output/b', act=tf.nn.relu)
-    return a, b
-
-def full_model(lm, data):
-    a, b = factorizer(lm, data)
-    chat = tf.reshape(tf.batch_matmul(tf.reshape(a, (-1, ROWS, POSRANK)), tf.reshape(b, (-1, POSRANK, COLS))), (-1, ROWS*COLS))
-
-
-    with tf.name_scope('error'):
-        squared_error = tf.reduce_mean(tf.reduce_sum((chat-data)**2, reduction_indices=[1]))
-        lm.summaries.scalar_summary('squared_error', squared_error)
-
-    return a, b, chat, squared_error
-
 def train():
+    print("\nSource code of training file {}:\n\n{}".format(__file__, open(__file__).read()))
+
     # Import data
     log('simulating data')
 
@@ -96,6 +77,29 @@ def train():
 
     test_data = test_data_all[2].reshape(TEST_SIZE, ROWS*COLS)
     train_data = train_data_all[2].reshape(TRAIN_SIZE, ROWS*COLS)
+
+    def factorizer(lm, data):
+        last = [(data-train_data.mean())/train_data.std()]
+        randomness = tf.random_normal(tf.shape(data))[:, :10]  # Stupid hack
+        #last.append(randomness)
+        for i in xrange(NUM_HIDDEN_LAYERS):
+            new_layer = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'factorizer/hidden/fc{}'.format(i), act=default_act, **do_bn)
+            #last.append(new_layer)
+            last[0] = new_layer
+        a = lm.nn_layer(last, ROWS * POSRANK, 'factorizer/output/a', act=tf.nn.relu)
+        b = lm.nn_layer(last, POSRANK * COLS, 'factorizer/output/b', act=tf.nn.relu)
+        return a, b
+
+    def full_model(lm, data):
+        a, b = factorizer(lm, data)
+        chat = tf.reshape(tf.batch_matmul(tf.reshape(a, (-1, ROWS, POSRANK)), tf.reshape(b, (-1, POSRANK, COLS))),
+                          (-1, ROWS * COLS))
+
+        with tf.name_scope('error'):
+            squared_error = tf.reduce_mean(tf.reduce_sum((chat - data) ** 2, reduction_indices=[1]))
+            lm.summaries.scalar_summary('squared_error', squared_error)
+
+        return a, b, chat, squared_error
 
 
     lm = LayerManager(forward_biased_estimate=False)
