@@ -148,7 +148,8 @@ def train():
     batch = tf.Variable(0)
     learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, batch, 5000, 0.8, staircase=True)
 
-    pretrain_step = tf.train.AdamOptimizer(0.03).minimize(rough_error, var_list=lm.scale_factory.variables)
+    if PRETRAIN:
+        pretrain_step = tf.train.AdamOptimizer(0.03).minimize(rough_error, var_list=lm.scale_factory.variables)
     train_step = tf.train.AdamOptimizer(learning_rate).minimize(-likelihood_bound, global_step=batch, var_list=lm.weight_factory.variables + lm.bias_factory.variables)
 
     def feed_dict(mode):

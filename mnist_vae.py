@@ -58,6 +58,7 @@ NUM_RUNS_FOR_ENTROPY_ESTIMATES = 100
 TRAIN = True
 BNAE = False
 CONV = False
+IND_ERROR = False  # encourage normality of Q(z|X) across entire training set
 # LATENT_DIM = 20
 LATENT_DIM = 2
 NUM_HIDDEN_LAYERS = 2
@@ -223,9 +224,11 @@ def train():
         lm.summaries.image_summary('cov', tf.expand_dims(tf.expand_dims(cov, 0), -1), 1)
         lm.summaries.image_summary('cov_error', tf.expand_dims(tf.expand_dims(cov-eye, 0), -1), 1)
         if BNAE:
-            error = squared_error + ind_err
+            error = squared_error
         else:
-            error = -likelihood_bound + ind_err
+            error = -likelihood_bound
+        if IND_ERROR:
+            error += ind_err
         return output_mean, output_log_std, error
 
     def prior_model(latent=None):  # option to call with latent as numpy array of shape 1xLATENT_DIM
@@ -364,9 +367,9 @@ def train():
                 ax.yaxis.set_ticks(numpy.linspace(*(extent_y + [ny])))
                 ax.set_xlabel('z_1')
                 ax.set_ylabel('z_2')
-                ax.set_title('P(X|z); decoding uniform samples from latent space')
+                ax.set_title('P(X|z); decoding latent space; (CONV, BNAE, IND_ERROR) = (%d,%d,%d)' % (CONV, BNAE, IND_ERROR))
                 plt.show()
-                plt.savefig(os.path.join(FLAGS.viz_dir, 'decoding_latent_space.png'))
+                plt.savefig(os.path.join(FLAGS.viz_dir, 'P(X|z).png'))
                 return fig, ax
 
             def latent_2d_scatter(latents, labels):  # if latent space is 2d we can visualize encoded data directly
@@ -376,13 +379,13 @@ def train():
                 im = ax.scatter(latents[order, 0], latents[order, 1], c=labels[order], cmap=cmap)
                 ax.set_xlabel('z_1')
                 ax.set_ylabel('z_2')
-                ax.set_title('Q(z|X_train)')
+                ax.set_title('Q(z|X_train); (CONV, BNAE, IND_ERROR) = (%d,%d,%d)' % (CONV, BNAE, IND_ERROR))
                 lims = [-5, 5]
                 ax.set_xlim(*lims)
                 ax.set_ylim(*lims)
                 f.colorbar(im, ax=ax, label='Digit class')
                 plt.show()
-                plt.savefig('%s/latent_2d_scatter.png' % FLAGS.viz_dir)
+                plt.savefig('%s/Q(z|X).png' % FLAGS.viz_dir)
                 return fig, ax
             if LATENT_DIM == 2:
                 f, a = decode_uniform_samples_from_latent_space(None)
