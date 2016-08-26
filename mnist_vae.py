@@ -23,11 +23,12 @@ from __future__ import division
 from __future__ import print_function
 
 import matplotlib.pyplot as plt
+import matplotlib, seaborn
 import numpy
 import scipy.stats
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
-
+import os, sys
 
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
@@ -44,6 +45,7 @@ flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
 flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
 flags.DEFINE_string('summaries_dir', '/tmp/mnist_vae/logs', 'Summaries directory')
 flags.DEFINE_string('train_dir', '/tmp/mnist_vae/save', 'Saves directory')
+flags.DEFINE_string('viz_dir', '/tmp/mnist_vae/viz', 'Viz directory')
 
 SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
 IMAGE_SIZE = 28
@@ -56,7 +58,9 @@ NUM_RUNS_FOR_ENTROPY_ESTIMATES = 100
 TRAIN = True
 BNAE = False
 CONV = False
-LATENT_DIM = 20
+IND_ERROR = False  # encourage normality of Q(z|X) across entire training set
+# LATENT_DIM = 20
+LATENT_DIM = 2
 NUM_HIDDEN_LAYERS = 2
 HIDDEN_LAYER_SIZE = 500
 
@@ -220,13 +224,18 @@ def train():
         lm.summaries.image_summary('cov', tf.expand_dims(tf.expand_dims(cov, 0), -1), 1)
         lm.summaries.image_summary('cov_error', tf.expand_dims(tf.expand_dims(cov-eye, 0), -1), 1)
         if BNAE:
-            error = squared_error + ind_err
+            error = squared_error
         else:
-            error = -likelihood_bound + ind_err
+            error = -likelihood_bound
+        if IND_ERROR:
+            error += ind_err
         return output_mean, output_log_std, error
 
-    def prior_model():
-        latent = tf.random_normal((prior_batch_size, LATENT_DIM))
+    def prior_model(latent=None):  # option to call with latent as numpy array of shape 1xLATENT_DIM
+        if latent is None:
+            latent = tf.random_normal((prior_batch_size, LATENT_DIM))
+        else:
+            latent = tf.convert_to_tensor(latent, dtype=tf.float32)
         output_mean_logit, output_log_std = decoder(latent)
         output_mean = tf.nn.sigmoid(output_mean_logit)
 
@@ -329,16 +338,68 @@ def train():
                 log('done')
         else:
             # Visualization code, nothing to do with training
-
+            if not os.path.exists(FLAGS.viz_dir):
+                os.makedirs(FLAGS.viz_dir)
             restore_latest(saver, sess, '/tmp/mnist_vae')
-            latent, latent_log_std = encoder(fed_input_data)
-            #latent = lm.reparam_normal_sample(latent_mean, latent_log_std, 'latent/sample')
-            latents, = sess.run([latent], feed_dict={fed_input_data: mnist.train.images})
-            import sklearn.decomposition
 
+            def decode_uniform_samples_from_latent_space(_):
+                fig, ax = plt.subplots()
+                nx = ny = 20
+                extent_x = extent_y = [-3, 3]
+                extent = numpy.array(extent_x + extent_y)
+                x_values = numpy.linspace(*(extent_x + [nx]))
+                y_values = numpy.linspace(*(extent_y + [nx]))
+                full_extent = extent * (nx + 1) / float(nx)
+                canvas = numpy.empty((28 * ny, 28 * nx))
+                for ii, yi in enumerate(x_values):
+                    for j, xi in enumerate(y_values):
+                        n = ii * nx + j + 1
+                        sys.stdout.write("\rsampling p(X|z), sample %d/%d" % (n, nx*ny))
+                        sys.stdout.flush()
+                        np_z = numpy.array([[xi, yi]])
+                        x_mean = sess.run(prior_model(latent=numpy.reshape(np_z, newshape=(1, LATENT_DIM)))[0])
+                        canvas[(nx - ii - 1) * 28:(nx - ii) * 28, j * 28:(j + 1) * 28] = x_mean[0].reshape(28, 28)
+                with seaborn.axes_style('ticks'):
+                    seaborn.set_context(context='notebook', font_scale=1.75)
+                    fig, ax = plt.subplots(figsize=(12, 9))
+                ax.imshow(canvas, extent=full_extent)
+                ax.xaxis.set_ticks(numpy.linspace(*(extent_x + [nx])))
+                ax.yaxis.set_ticks(numpy.linspace(*(extent_y + [ny])))
+                ax.set_xlabel('z_1')
+                ax.set_ylabel('z_2')
+                ax.set_title('P(X|z); decoding latent space; (CONV, BNAE, IND_ERROR) = (%d,%d,%d)' % (CONV, BNAE, IND_ERROR))
+                plt.show()
+                plt.savefig(os.path.join(FLAGS.viz_dir, 'P(X|z).png'))
+                return fig, ax
+
+            def latent_2d_scatter(latents, labels):  # if latent space is 2d we can visualize encoded data directly
+                fig, ax = plt.subplots(figsize=(12, 9))
+                cmap = matplotlib.colors.ListedColormap(seaborn.color_palette("hls", 10))
+                order = numpy.random.permutation(xrange(latents.shape[0]))  # avoid, e.g., all 9's on scatter top layer
+                im = ax.scatter(latents[order, 0], latents[order, 1], c=labels[order], cmap=cmap)
+                ax.set_xlabel('z_1')
+                ax.set_ylabel('z_2')
+                ax.set_title('Q(z|X_train); (CONV, BNAE, IND_ERROR) = (%d,%d,%d)' % (CONV, BNAE, IND_ERROR))
+                lims = [-5, 5]
+                ax.set_xlim(*lims)
+                ax.set_ylim(*lims)
+                f.colorbar(im, ax=ax, label='Digit class')
+                plt.show()
+                plt.savefig('%s/Q(z|X).png' % FLAGS.viz_dir)
+                return fig, ax
+            if LATENT_DIM == 2:
+                f, a = decode_uniform_samples_from_latent_space(None)
+                plt.close(f)
+            latent, latent_log_std = encoder(fed_input_data)
+            latents, = sess.run([latent], feed_dict={fed_input_data: mnist.train.images})
+            labels = mnist.train.labels
+            if LATENT_DIM == 2:
+                f, a = latent_2d_scatter(latents=latents, labels=labels)
+                plt.close(f)
+            #latent = lm.reparam_normal_sample(latent_mean, latent_log_std, 'latent/sample')
+            import sklearn.decomposition
             # f = sklearn.decomposition.FastICA()
             # latents = f.fit_transform(latents)
-
             xlow = numpy.percentile(latents, 0.1)
             xhigh = numpy.percentile(latents, 99.9)
             xhigh = max(xhigh, -xlow)
@@ -353,7 +414,6 @@ def train():
                 data = latents[:, ind[0]]
                 ax.hist(data, num_bins, range=(xlow, xhigh))
                 norm = scipy.stats.norm(loc=data.mean(), scale=data.std()).pdf(x)*latents.shape[0]*(xhigh-xlow)/num_bins
-
                 plt.plot(x, norm)
                 plt.title('Distribution of latent ICA component ' + str(ind[0]))
                 plt.xlim(xlow, xhigh)
@@ -365,8 +425,8 @@ def train():
             latent_hist(None)
             cid = fig.canvas.mpl_connect('button_press_event', latent_hist)
             plt.show()
+            plt.savefig('%s/latent_hist_%i.png' % (FLAGS.viz_dir, ind[0]))
             fig.canvas.mpl_disconnect(cid)
-
         coord.request_stop()
         coord.join(threads)
         sess.close()
