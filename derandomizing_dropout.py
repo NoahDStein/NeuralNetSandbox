@@ -83,7 +83,7 @@ def dropout(x, keep_prob, noise_shape=None, seed=None, name=None):
                                                    dtype=x.dtype)
         # 0. if [keep_prob, 1.0) and 1. if [1.0, 1.0 + keep_prob)
         binary_tensor = math_ops.floor(random_tensor)
-        ret = x * math_ops.inv(tf.reduce_mean(keep_prob)) * binary_tensor
+        ret = x * math_ops.inv(tf.reduce_mean(keep_prob, reduction_indices=[1], keep_dims=True)) * binary_tensor
         ret.set_shape(x.get_shape())
         return ret
 
@@ -152,13 +152,13 @@ def train():
         drop_probs = [tf.Variable(tf.constant(DEFAULT_KEEP_PROB, shape=[1, HIDDEN_LAYER_SIZE], dtype=tf.float32), trainable=False, collections='Dropout') for _ in xrange(NUM_HIDDEN_LAYERS)]
 
     with tf.name_scope('posterior'):
-        training_output, training_cross_entropy, training_percent_error, _ = full_model(lm, drop_probs, *training_batch)
+        training_output, training_cross_entropy, training_percent_error, _, _ = full_model(lm, drop_probs, *training_batch)
     training_merged = lm.summaries.merge_all_summaries()
     lm.is_training = False
     tf.get_variable_scope().reuse_variables()
     lm.summaries.reset()
     with tf.name_scope('test'):
-        test_output, test_cross_entropy, test_percent_error, test_incorrect_examples = full_model(lm, drop_probs, fed_input_data, fed_input_labels)
+        test_output, test_cross_entropy, test_percent_error, test_cross_entropies, test_incorrect_examples = full_model(lm, drop_probs, fed_input_data, fed_input_labels)
     test_merged = lm.summaries.merge_all_summaries()
 
     saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
