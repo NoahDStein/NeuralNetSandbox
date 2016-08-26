@@ -213,9 +213,9 @@ def log(s):
     print('[%s] ' % time.asctime() + s)
 
 
-def restore_latest(saver, sess, path):
+def restore_latest(saver, sess, path, suffix=''):
     dated_files = [(os.path.getmtime(path + '/' + fn), os.path.basename(fn)) for fn in os.listdir(path) if
-                   fn.startswith('save') and os.path.splitext(fn)[1] == '']
+                   fn.startswith('save') and fn.endswith(suffix) and os.path.splitext(fn)[1] == '']
     dated_files.sort()
     dated_files.reverse()
     newest = dated_files[0][1]

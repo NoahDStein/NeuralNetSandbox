@@ -23,15 +23,13 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy
-import scipy.stats
 import tensorflow as tf
-from tensorflow.examples.tutorials.mnist import input_data
 
-from tfutil import LayerManager, log
+from tfutil import LayerManager, log, ConstantInit
 
 ROWS = 10
 COLS = 10
-POSRANK = 13
+POSRANK = 7
 
 TRAIN_SIZE = 60000
 TEST_SIZE = 10000
@@ -41,8 +39,15 @@ BATCH_SIZE = 64
 PRIOR_BATCH_SIZE = 10
 
 TRAIN = True
-NUM_HIDDEN_LAYERS = 2
-HIDDEN_LAYER_SIZE = 500
+NUM_HIDDEN_LAYERS = 20
+HIDDEN_LAYER_SIZE = 300
+
+RANDOM_INPUTS = 10
+
+min_hidden_layer_size = ROWS*COLS + RANDOM_INPUTS + ROWS*POSRANK + COLS*POSRANK
+
+if min_hidden_layer_size > HIDDEN_LAYER_SIZE:
+    raise ValueError('Not enough lanes on the highway.  Increase HIDDEN_LAYER_SIZE to at least {}.'.format(min_hidden_layer_size))
 
 
 def rand_nmf(rows, cols, pos_rank, num_examples):
@@ -58,7 +63,6 @@ def id_act(z):
 def double_relu(z):
     return [tf.nn.relu(z), tf.nn.relu(-z)]
 
-default_act = tf.nn.relu  # double_relu
 do_bn = dict(bn=False)
 
 def train():
@@ -79,15 +83,23 @@ def train():
     train_data = train_data_all[2].reshape(TRAIN_SIZE, ROWS*COLS)
 
     def factorizer(lm, data):
-        last = [(data-train_data.mean())/train_data.std()]
-        randomness = tf.random_normal(tf.shape(data))[:, :10]  # Stupid hack
-        #last.append(randomness)
+        last = (data-train_data.mean())/train_data.std()
+        randomness = tf.random_normal((tf.shape(data)[0], RANDOM_INPUTS))
+        zeros = tf.zeros((tf.shape(data)[0], HIDDEN_LAYER_SIZE - ROWS*COLS - RANDOM_INPUTS))
+        last = tf.concat(1, [last, randomness, zeros])
+        last.set_shape([data.get_shape()[0], HIDDEN_LAYER_SIZE])  # Help tensorflow's shape inference
         for i in xrange(NUM_HIDDEN_LAYERS):
-            new_layer = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'factorizer/hidden/fc{}'.format(i), act=default_act, **do_bn)
-            #last.append(new_layer)
-            last[0] = new_layer
-        a = lm.nn_layer(last, ROWS * POSRANK, 'factorizer/output/a', act=tf.nn.relu)
-        b = lm.nn_layer(last, POSRANK * COLS, 'factorizer/output/b', act=tf.nn.relu)
+            new_value = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'factorizer/hidden/fc{}'.format(i), act=tf.nn.relu, **do_bn)
+            init = lm.bias_factory.init
+            lm.bias_factory.init = ConstantInit(-4.0)  # HACK HACK HACK
+            gate = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'factorizer/gate/fc{}'.format(i), act=tf.nn.sigmoid, **do_bn)
+            lm.bias_factory.init = init
+            new_value = gate * new_value + (1 - gate) * last  # Highway layer
+            last = new_value
+        # a = lm.nn_layer(last, ROWS * POSRANK, 'factorizer/output/a', act=tf.nn.relu, **do_bn)
+        # b = lm.nn_layer(last, POSRANK * COLS, 'factorizer/output/b', act=tf.nn.relu, **do_bn)
+        a = last[:, HIDDEN_LAYER_SIZE-ROWS*POSRANK-POSRANK*COLS:HIDDEN_LAYER_SIZE-POSRANK*COLS]
+        b = last[:, HIDDEN_LAYER_SIZE-POSRANK*COLS:]
         return a, b
 
     def full_model(lm, data):
@@ -98,8 +110,9 @@ def train():
         with tf.name_scope('error'):
             squared_error = tf.reduce_mean(tf.reduce_sum((chat - data) ** 2, reduction_indices=[1]))
             lm.summaries.scalar_summary('squared_error', squared_error)
+            weight_decay = sum([tf.reduce_sum(t ** 2) for t in lm.weight_factory.variables + lm.bias_factory.variables])
 
-        return a, b, chat, squared_error
+        return a, b, chat, squared_error, squared_error + 0.001*weight_decay
 
 
     lm = LayerManager(forward_biased_estimate=False)
@@ -113,20 +126,20 @@ def train():
         fed_input_data = tf.placeholder(tf.float32, [None, ROWS*COLS])
 
     with tf.name_scope('posterior'):
-        _, _, _, train_squared_error = full_model(lm, training_batch)
+        _, _, _, train_squared_error, regularized_error = full_model(lm, training_batch)
     training_merged = lm.summaries.merge_all_summaries()
     lm.is_training = False
     tf.get_variable_scope().reuse_variables()
     lm.summaries.reset()
     with tf.name_scope('test'):
-        _, _, _, test_squared_error = full_model(lm, fed_input_data)
+        _, _, _, test_squared_error, _ = full_model(lm, fed_input_data)
     test_merged = lm.summaries.merge_all_summaries()
 
     saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
 
-    learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, batch, 5000, 0.8, staircase=True)
+    learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, batch, 5000, 0.9, staircase=True)
 
-    train_step = tf.train.AdamOptimizer(learning_rate).minimize(train_squared_error, global_step=batch, var_list=lm.weight_factory.variables + lm.bias_factory.variables + lm.scale_factory.variables)
+    train_step = tf.train.AdamOptimizer(learning_rate).minimize(regularized_error, global_step=batch, var_list=lm.weight_factory.variables + lm.bias_factory.variables + lm.scale_factory.variables)
 
     def feed_dict(mode):
         """Make a TensorFlow feed_dict: maps data onto Tensor placeholders."""
