@@ -71,19 +71,19 @@ def train():
 
     def encoder(data):
         last = data
-        for i in xrange(NUM_HIDDEN_LAYERS):
+        for i in range(NUM_HIDDEN_LAYERS):
             last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'encoder/hidden{}'.format(i), act=double_relu, scale=False, bn=True)
         latent = lm.nn_layer(last, LATENT_DIM, 'latent', act=id_act, bias=False, scale=False, bn=True)
         return latent
 
     def decoder(code):
         last = code
-        for i in xrange(NUM_HIDDEN_LAYERS):
+        for i in range(NUM_HIDDEN_LAYERS):
             last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'decoder/hidden{}'.format(i), act=double_relu, scale=False, bn=True)
         # norm_freq = lm.nn_layer(last, 1, 'decoder/norm_freq', act=tf.nn.sigmoid)
         # output = tf.constant(0.0, dtype=tf.float32)
         # output_log_std = tf.constant(0.0, dtype=tf.float32)
-        # for i in xrange(1, NUM_COMPONENTS+1):
+        # for i in range(1, NUM_COMPONENTS+1):
         #     sin_weight = lm.nn_layer(last, 1, 'decoder/mean_sin_weight{}'.format(i))
         #     cos_weight = lm.nn_layer(last, 1, 'decoder/mean_cos_weight{}'.format(i))
         #     output = output + lm.parametrized_sinusoid(SIG_LEN, norm_freq*i, sin_weight, cos_weight)
@@ -160,7 +160,7 @@ def train():
             test_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/test')
             try:
                 log('starting training')
-                for i in xrange(FLAGS.max_steps):
+                for i in range(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
                         summary, err = sess.run([test_merged, test_error], feed_dict=feed_dict('test'))
                         test_writer.add_summary(summary, i)

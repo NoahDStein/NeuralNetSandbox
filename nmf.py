@@ -88,7 +88,7 @@ def train():
         zeros = tf.zeros((tf.shape(data)[0], HIDDEN_LAYER_SIZE - ROWS*COLS - RANDOM_INPUTS))
         last = tf.concat(1, [last, randomness, zeros])
         last.set_shape([data.get_shape()[0], HIDDEN_LAYER_SIZE])  # Help tensorflow's shape inference
-        for i in xrange(NUM_HIDDEN_LAYERS):
+        for i in range(NUM_HIDDEN_LAYERS):
             new_value = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'factorizer/hidden/fc{}'.format(i), act=tf.nn.relu, **do_bn)
             init = lm.bias_factory.init
             lm.bias_factory.init = ConstantInit(-4.0)  # HACK HACK HACK
@@ -161,7 +161,7 @@ def train():
             test_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/test')
             try:
                 log('starting training')
-                for i in xrange(FLAGS.max_steps):
+                for i in range(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
                         summary, err = sess.run([test_merged, test_squared_error], feed_dict=feed_dict('test'))
                         test_writer.add_summary(summary, i)

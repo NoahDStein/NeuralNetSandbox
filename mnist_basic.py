@@ -30,12 +30,6 @@ import scipy.stats
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 
-
-from tensorflow.python.framework import ops
-from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import constant_op
-from tensorflow.python.ops import math_ops
-
 from tfutil import LayerManager, log
 
 SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
@@ -47,7 +41,7 @@ BATCH_SIZE = 64
 PRIOR_BATCH_SIZE = 10
 
 TRAIN = True
-CONV = False
+CONV = True
 NUM_HIDDEN_LAYERS = 2
 HIDDEN_LAYER_SIZE = 500
 
@@ -69,17 +63,19 @@ def classifier(lm, data):
     last = data - 0.5
     if CONV:
         last = tf.reshape(last, [-1, IMAGE_SIZE, IMAGE_SIZE, 1])
-        last = lm.conv_layer(last, 3, 3, 32, 'classifier/hidden/conv0', act=default_act, **do_bn)
+        last = lm.conv_layer(last, 3, 3, 16, 'classifier/hidden/conv0', act=default_act, **do_bn)
+        last = lm.max_pool(last, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
         last = lm.conv_layer(last, 3, 3, 32, 'classifier/hidden/conv1', act=default_act, **do_bn)
-        last = lm.conv_layer(last, 3, 3, 32, 'classifier/hidden/conv2', act=default_act, **do_bn)
         last = lm.max_pool(last, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
-        last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv3', act=default_act, **do_bn)
-        last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv4', act=default_act, **do_bn)
-        last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv5', act=default_act, **do_bn)
+        last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv2', act=default_act, **do_bn)
         last = lm.max_pool(last, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
+        # last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv3', act=default_act, **do_bn)
+        # last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv4', act=default_act, **do_bn)
+        # last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv5', act=default_act, **do_bn)
+        # last = lm.max_pool(last, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
         shape = last.get_shape().as_list()
         last = tf.reshape(last, [-1, shape[1] * shape[2] * shape[3]])
-    for i in xrange(NUM_HIDDEN_LAYERS):
+    for i in range(NUM_HIDDEN_LAYERS):
         last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'classifier/hidden/fc{}'.format(i), act=default_act, **do_bn)
         last = tf.nn.dropout(last, 0.7)
     last = lm.nn_layer(last, NUM_CLASSES, 'classifier/output/logits', act=id_act)
@@ -153,7 +149,7 @@ def train():
             test_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/test')
             try:
                 log('starting training')
-                for i in xrange(FLAGS.max_steps):
+                for i in range(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
                         summary, err = sess.run([test_merged, test_percent_error], feed_dict=feed_dict('test'))
                         test_writer.add_summary(summary, i)
@@ -161,7 +157,7 @@ def train():
                     if i % 5000 == 4999:
                         NUM_RUNS = 100
                         runs = []
-                        for _ in xrange(NUM_RUNS):
+                        for _ in range(NUM_RUNS):
                             new_output_probs, = sess.run([test_output], feed_dict=feed_dict('test'))
                             new_output = numpy.argmax(new_output_probs, 1)
                             runs.append(new_output)

@@ -78,7 +78,7 @@ def train():
 
     def encoder(data):
         last = data
-        for i in xrange(NUM_HIDDEN_LAYERS):
+        for i in range(NUM_HIDDEN_LAYERS):
             last = lm_ae.nn_layer(last, HIDDEN_LAYER_SIZE, 'encoder/hidden{}'.format(i), act=double_relu)
         with tf.variable_scope('latent'):
             latent_mean = lm_ae.nn_layer(last, LATENT_DIM, 'mean', act=id_act)
@@ -87,7 +87,7 @@ def train():
 
     def decoder(code):
         last = code
-        for i in xrange(NUM_HIDDEN_LAYERS):
+        for i in range(NUM_HIDDEN_LAYERS):
             last = lm_ae.nn_layer(last, HIDDEN_LAYER_SIZE, 'decoder/hidden{}'.format(i), act=double_relu)
         output_mean = lm_ae.nn_layer(last, SIG_LEN, 'output/mean', act=id_act)
         output_log_std = lm_ae.nn_layer(last, SIG_LEN, 'output/log_std', act=log_std_act)
@@ -95,7 +95,7 @@ def train():
 
     def discriminator(latent):
         last = latent
-        for i in xrange(1):
+        for i in range(1):
             last = lm_disc.nn_layer(last, 20, 'discriminator/hidden{}'.format(i), act=double_relu)
         output_logit = lm_disc.nn_layer(last, 1, 'discrimator/prediction', act=id_act)
         return output_logit
@@ -185,25 +185,25 @@ def train():
             try:
                 if PRETRAIN:
                     log('starting pre-training')
-                    for i in xrange(3000):
+                    for i in range(3000):
                         err, _ = sess.run([rough_error, pretrain_step], feed_dict=feed_dict('train'))
                         if i % 100 == 99:
                             log('batch %s: single training batch rough error = %s' % (i, err))
                 #validate(0, write_summary=False)
                 log('initializing ae')
-                for i in xrange(5000):
+                for i in range(5000):
                     re, _ = sess.run([reconstruction_error, ae_train_step], feed_dict=feed_dict('train'))
                     if i % 1000 == 999:
                         log('batch %s: single training batch reconstruction error = %s' % (i, re))
                 # #validate(0, write_summary=False)
                 # log('initializing discriminator')
-                # for i in xrange(5000):
+                # for i in range(5000):
                 #     ce, _ = sess.run([disc_cross_entropy, disc_train_step], feed_dict('train'))
                 #     if i % 1000 == 999:
                 #         log('batch %s: single training batch cross entropy = %s' % (i, ce))
                 #validate(0, write_summary=False)
                 log('starting training')
-                for i in xrange(FLAGS.max_steps):
+                for i in range(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
                         validate(i)
                     # if i % 10 == 0:

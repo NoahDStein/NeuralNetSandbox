@@ -30,11 +30,6 @@ import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 import os, sys
 
-from tensorflow.python.framework import ops
-from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import constant_op
-from tensorflow.python.ops import math_ops
-
 from tfutil import LayerManager, listify, log, restore_latest
 from mnist_basic import classifier
 
@@ -58,10 +53,12 @@ NUM_RUNS_FOR_ENTROPY_ESTIMATES = 100
 TRAIN = True
 BNAE = False
 CONV = False
+
 IND_ERROR = False  # encourage normality of Q(z|X) across entire training set
 # LATENT_DIM = 20
 LATENT_DIM = 2
 NUM_HIDDEN_LAYERS = 2
+
 HIDDEN_LAYER_SIZE = 500
 
 if CONV:
@@ -69,28 +66,24 @@ if CONV:
     small_image_area = small_image_size * small_image_size
     HIDDEN_LAYER_SIZE = (HIDDEN_LAYER_SIZE // small_image_area) * small_image_area
 
-# Adapted from tf's clip_ops.py, so this probably inherits the Apache license
-def clip_rows_by_norm(t, clip_norm, name=None):
-    with ops.op_scope([t, clip_norm], name, "clip_by_norm") as name:
-        t = ops.convert_to_tensor(t, name="t")
+def stat_summary(a):
+    a = numpy.array(a)
+    return [numpy.mean(a <= 0.0), numpy.mean(a <= 0.25), numpy.mean(a <= 0.5), numpy.mean(a <= 1.0), numpy.mean(a<=2.0)]
+    #return [numpy.min(a), numpy.percentile(a, 25), numpy.percentile(a, 50), numpy.percentile(a, 75), numpy.max(a)]
 
-        # Calculate L2-norm, clip elements by ratio of clip_norm to L2-norm
-        l2norm_inv = math_ops.rsqrt(
-            math_ops.reduce_sum(t * t, reduction_indices=[1], keep_dims=True))
-        tclip = array_ops.identity(t * clip_norm * math_ops.minimum(
-            l2norm_inv, tf.cast(constant_op.constant(1.0 / clip_norm), t.dtype)), name=name)
 
-    return tclip
 
 
 def train():
+    print("\nSource code of training file {}:\n\n{}".format(__file__, open(__file__).read()))
+
     log('loading MNIST')
     # Import data
     mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=False)
     TRAIN_SIZE=mnist.train.images.shape[0]
 
     lm = LayerManager(forward_biased_estimate=False)
-    lm_classifier = LayerManager(forward_biased_estimate=False)
+    lm_classifier = LayerManager(forward_biased_estimate=False, is_training=False)
     batch = tf.Variable(0)
 
     prior_batch_size = tf.placeholder(tf.int64, [])
@@ -127,10 +120,10 @@ def train():
             last = lm.max_pool(last, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
             shape = last.get_shape().as_list()
             last = tf.reshape(last, [-1, shape[1] * shape[2] * shape[3]])
-        for i in xrange(NUM_HIDDEN_LAYERS):
+        for i in range(NUM_HIDDEN_LAYERS):
             last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'encoder/hidden/fc{}'.format(i), act=default_act, **do_bn)
         if BNAE:
-            latent_mean = lm.nn_layer(last, LATENT_DIM, 'latent/mean', act=id_act)#, bias=False, scale=False, **do_bn)
+            latent_mean = lm.nn_layer(last, LATENT_DIM, 'latent/mean', act=id_act, **do_bn) #, bias=False, scale=False)
         else:
             latent_mean = lm.nn_layer(last, LATENT_DIM, 'latent/mean', act=id_act, **do_bn)
         latent_log_std = lm.nn_layer(last, LATENT_DIM, 'latent/log_std', act=log_std_act, **do_bn)
@@ -138,7 +131,7 @@ def train():
 
     def decoder(code):
         last = code
-        for i in xrange(NUM_HIDDEN_LAYERS):
+        for i in range(NUM_HIDDEN_LAYERS):
             last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'decoder/hidden/fc{}'.format(i), act=default_act, **do_bn)
         if CONV:
             last_num_filters = HIDDEN_LAYER_SIZE // ((IMAGE_SIZE // 4)*(IMAGE_SIZE // 4))
@@ -166,7 +159,6 @@ def train():
             latent = latent_mean
         else:
             latent = lm.reparam_normal_sample(latent_mean, latent_log_std, 'latent/sample')
-        #latent = clip_rows_by_norm(latent, numpy.sqrt(LATENT_DIM + 4.0*numpy.sqrt(2.0*LATENT_DIM)))
         output_mean_logit, output_log_std = decoder(latent)
         output_mean = tf.nn.sigmoid(output_mean_logit)
 
@@ -195,7 +187,7 @@ def train():
             lm.summaries.scalar_summary('squared_error', squared_error)
 
         with tf.name_scope('independence_error'):
-            num_normal_constraints = LATENT_DIM**2  # Who knows what this should be
+            num_normal_constraints = 20*LATENT_DIM  # Who knows what this should be
             unit = tf.nn.l2_normalize(tf.random_normal((LATENT_DIM, num_normal_constraints)), 0)
             z = tf.matmul(latent, unit)  # random orthogonal projection of latent
             center = tf.truncated_normal([num_normal_constraints])
@@ -223,6 +215,7 @@ def train():
         eye = tf.diag(tf.ones((LATENT_DIM,)))
         lm.summaries.image_summary('cov', tf.expand_dims(tf.expand_dims(cov, 0), -1), 1)
         lm.summaries.image_summary('cov_error', tf.expand_dims(tf.expand_dims(cov-eye, 0), -1), 1)
+        weight_decay = sum([tf.reduce_sum(t**2) for t in lm.weight_factory.variables + lm.bias_factory.variables])
         if BNAE:
             error = squared_error
         else:
@@ -268,7 +261,7 @@ def train():
     def feed_dict(mode):
         """Make a TensorFlow feed_dict: maps data onto Tensor placeholders."""
         if mode == 'test':
-            return {fed_input_data: mnist.test.images, prior_batch_size: 10000}
+            return {fed_input_data: mnist.test.images, prior_batch_size: 1000}
         else:
             return {prior_batch_size: PRIOR_BATCH_SIZE}
 
@@ -286,21 +279,21 @@ def train():
         restore_latest(classifier_saver, sess, '/tmp/mnist_basic')
 
         runs = []
-        for _ in xrange(NUM_RUNS_FOR_ENTROPY_ESTIMATES):
-            new_output_probs, = sess.run([classifier_logits], feed_dict=feed_dict('test'))
+        for _ in range(NUM_RUNS_FOR_ENTROPY_ESTIMATES):
+            new_output_probs, = sess.run([classifier_logits], feed_dict={fed_input_data: mnist.test.images[:1000, :]})
             new_output = numpy.argmax(new_output_probs, 1)
             runs.append(new_output)
 
         all_runs = numpy.vstack(runs).T
-        ave_entropy = numpy.mean([scipy.stats.entropy(numpy.bincount(row), base=2.0) for row in all_runs])
-        log('Average prediction entropy on test data = %.4f bits' % ave_entropy)
+        entropy_summary = stat_summary([scipy.stats.entropy(numpy.bincount(row), base=2.0) for row in all_runs])
+        log('Summary of prediction entropy on 1000 test data samples = {}'.format(entropy_summary))
 
 
         if TRAIN:
 
             try:
                 log('starting training')
-                for i in xrange(FLAGS.max_steps):
+                for i in range(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
                         summary, err = sess.run([test_merged, test_error], feed_dict=feed_dict('test'))
                         test_writer.add_summary(summary, i)
@@ -310,15 +303,15 @@ def train():
                         prior_sample_data, = sess.run([prior_sample], feed_dict=feed_dict('test'))
 
                         runs = []
-                        for _ in xrange(NUM_RUNS_FOR_ENTROPY_ESTIMATES):
+                        for _ in range(NUM_RUNS_FOR_ENTROPY_ESTIMATES):
                             new_output_probs, = sess.run([classifier_logits], feed_dict={fed_input_data: prior_sample_data})
                             new_output = numpy.argmax(new_output_probs, 1)
                             runs.append(new_output)
 
                         all_runs = numpy.vstack(runs).T
-                        ave_entropy = numpy.mean([scipy.stats.entropy(numpy.bincount(row), base=2.0) for row in all_runs])
+                        entropy_summary = stat_summary([scipy.stats.entropy(numpy.bincount(row), base=2.0) for row in all_runs])
 
-                        log('batch %s: Average prediction entropy on prior samples = %.4f bits' % (i, ave_entropy))
+                        log('batch {}: summary of prediction entropy on prior samples = {}'.format(i, entropy_summary))
 
                     if i % 100 == 99: # Record a summary
                         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
@@ -375,7 +368,7 @@ def train():
             def latent_2d_scatter(latents, labels):  # if latent space is 2d we can visualize encoded data directly
                 fig, ax = plt.subplots(figsize=(12, 9))
                 cmap = matplotlib.colors.ListedColormap(seaborn.color_palette("hls", 10))
-                order = numpy.random.permutation(xrange(latents.shape[0]))  # avoid, e.g., all 9's on scatter top layer
+                order = numpy.random.permutation(range(latents.shape[0]))  # avoid, e.g., all 9's on scatter top layer
                 im = ax.scatter(latents[order, 0], latents[order, 1], c=labels[order], cmap=cmap)
                 ax.set_xlabel('z_1')
                 ax.set_ylabel('z_2')

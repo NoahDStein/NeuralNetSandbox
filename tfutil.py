@@ -116,7 +116,7 @@ class LayerManager(object):
             layer_name = tf.get_variable_scope().name
             preactivate = 0.0
             input_tensor = listify(input_tensor)
-            for i in xrange(len(input_tensor)):
+            for i in range(len(input_tensor)):
                 input_dim = input_tensor[i].get_shape().as_list()[1]
                 weights = self.weight_factory.get_variable('weight{}'.format(i), [input_dim, output_dim])
                 preactivate = preactivate + tf.matmul(input_tensor[i], weights)
@@ -131,7 +131,7 @@ class LayerManager(object):
             self.summaries.histogram_summary(layer_name + '/pre_activations', preactivate)
             activations = act(preactivate)
             try:
-                for i in xrange(len(activations)):
+                for i in range(len(activations)):
                     self.summaries.histogram_summary(layer_name + '/activations{}'.format(i), activations[i])
             except TypeError:
                 self.summaries.histogram_summary(layer_name + '/activations', activations)
@@ -145,7 +145,7 @@ class LayerManager(object):
             layer_name = tf.get_variable_scope().name
             preactivate = 0.0
             input_tensor = listify(input_tensor)
-            for i in xrange(len(input_tensor)):
+            for i in range(len(input_tensor)):
                 num_channels_in = input_tensor[i].get_shape().as_list()[3]
                 filters = self.filter_factory.get_variable('filter{}'.format(i), [filter_height, filter_width, num_channels_in, num_filters])
                 preactivate = preactivate + tf.nn.conv2d(input_tensor[i], filters, strides=[1, 1, 1, 1], padding='SAME')
@@ -160,7 +160,7 @@ class LayerManager(object):
             self.summaries.histogram_summary(layer_name + '/pre_activations', preactivate)
             activations = act(preactivate)
             try:
-                for i in xrange(len(activations)):
+                for i in range(len(activations)):
                     self.summaries.histogram_summary(layer_name + '/activations{}'.format(i), activations[i])
             except TypeError:
                 self.summaries.histogram_summary(layer_name + '/activations', activations)
@@ -184,7 +184,7 @@ class LayerManager(object):
         return sin_weight*tf.sin(arg) + cos_weight*tf.cos(arg)
 
     def batch_normalization(self, input_tensor, name, decay=0.95, normalization_indices=None):
-        mt = MomentTracker(input_tensor, decay=decay, collections='BatchNormInternal', reduction_indices=normalization_indices or [0])
+        mt = MomentTracker(input_tensor, decay=decay, collections=['BatchNormInternal'], reduction_indices=normalization_indices or [0])
         if self.is_training:
             with tf.control_dependencies([mt.update_mean]):
                 mean = tf.identity(mt.batch_mean)

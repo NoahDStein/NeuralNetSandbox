@@ -42,7 +42,7 @@ class MomentTracker(object):
 
         value_shape = value.get_shape().as_list()
         shape = []
-        for dim in xrange(len(value_shape)):
+        for dim in range(len(value_shape)):
             if dim in self.reduction_indices:
                 shape.append(1)
             else:
