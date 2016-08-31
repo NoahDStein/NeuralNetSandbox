@@ -22,44 +22,38 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import time
-import os
-import matplotlib.pyplot as plt
 import numpy
 import scipy.stats
 import tensorflow as tf
-from tensorflow.examples.tutorials.mnist import input_data
+
+import tensorflow.models.image.cifar10.cifar10 as cifar10
 
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 
-from tfutil import LayerManager, log, restore_latest
+from tfutil import LayerManager, log, restore_latest, multi_class_hinge_loss
+
+flags = tf.app.flags
+FLAGS = flags.FLAGS
 
 SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
-IMAGE_SIZE = 28
+IMAGE_SIZE = cifar10.IMAGE_SIZE
 IMAGE_AREA = IMAGE_SIZE*IMAGE_SIZE
 NUM_CLASSES = 10
-SEED = 66478  # Set to None for random seed.
-BATCH_SIZE = 64
+BATCH_SIZE = FLAGS.batch_size
 BATCHES_PER_DERANDOMIZE_STEP = 40
-PRIOR_BATCH_SIZE = 10
 BINOMIAL_TEST_CUTOFF = 3
 CHI2_TEST_CUTOFF = 25
 SIGNIFICANCE_LEVEL = 0.5
 
-TRAIN = False
-DERANDOMIZE_DROPOUT = False
-CONV = False
-NUM_HIDDEN_LAYERS = 2
-HIDDEN_LAYER_SIZE = 500
+TRAIN = True
+DERANDOMIZE_DROPOUT = True
 DEFAULT_KEEP_PROB = 0.5
 
-if CONV:
-    small_image_size = IMAGE_SIZE // 4
-    small_image_area = small_image_size * small_image_size
-    HIDDEN_LAYER_SIZE = (HIDDEN_LAYER_SIZE // small_image_area) * small_image_area
+DROPOUT_LAYER_SIZES = [96, 192]
+NUM_DROPOUT_LAYERS = len(DROPOUT_LAYER_SIZES)
 
 def id_act(z):
     return z
@@ -108,97 +102,104 @@ def double_relu_dropout(x, keep_prob, noise_shape=None, seed=None, name=None):
 
 
 default_act = tf.nn.relu  # double_relu
-do_bn = dict(bn=False)
+do_bn = dict(bn=True)
 
-def classifier(lm, data, drop_probs):
-    last = data - 0.5
-    if CONV:
-        last = tf.reshape(last, [-1, IMAGE_SIZE, IMAGE_SIZE, 1])
-        last = lm.conv_layer(last, 3, 3, 16, 'classifier/hidden/conv0', act=default_act, **do_bn)
-        last = lm.max_pool(last, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
-        last = lm.conv_layer(last, 3, 3, 32, 'classifier/hidden/conv1', act=default_act, **do_bn)
-        last = lm.max_pool(last, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
-        last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv2', act=default_act, **do_bn)
-        last = lm.max_pool(last, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
-        # last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv3', act=default_act, **do_bn)
-        # last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv4', act=default_act, **do_bn)
-        # last = lm.conv_layer(last, 3, 3, 64, 'classifier/hidden/conv5', act=default_act, **do_bn)
-        # last = lm.max_pool(last, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
-        shape = last.get_shape().as_list()
-        last = tf.reshape(last, [-1, shape[1] * shape[2] * shape[3]])
-    for i in range(NUM_HIDDEN_LAYERS):
-        last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'classifier/hidden/fc{}'.format(i), act=double_relu, **do_bn)
-        # last = [0.5*last[0], 0.5*last[1]]
-        last = double_relu_dropout(last, drop_probs[i])
-    last = lm.nn_layer(last, NUM_CLASSES, 'classifier/output/logits', act=id_act)
-    return last
+def classifier(lm, last, drop_probs):
+    logits = []
+    last = lm.conv_layer(last, 5, 5, 192, 'classifier/hidden/conv0', act=id_act, **do_bn)
+
+    logits.append(lm.nn_layer(tf.reshape(last, [-1, IMAGE_AREA*192]), 10, 'classifier/output/logits0', act=id_act, **do_bn))
+
+    last = tf.nn.relu(last)
+    last = lm.conv_layer(last, 1, 1, 160, 'classifier/hidden/conv0mlp0', act=tf.nn.relu, **do_bn)
+    last = lm.conv_layer(last, 1, 1, 96, 'classifier/hidden/conv0mlp1', act=tf.nn.relu, **do_bn)
+    last = lm.max_pool(last, ksize=[1, 3, 3, 1], strides=[1, 2, 2, 1], padding='SAME')
+    last = dropout(last, drop_probs[0])
+
+    last = lm.conv_layer(last, 5, 5, 192, 'classifier/hidden/conv1', act=id_act, **do_bn)
+
+    logits.append(lm.nn_layer(tf.reshape(last, [-1, IMAGE_AREA*192//4]), 10, 'classifier/output/logits1', act=id_act, **do_bn))
+
+    last = tf.nn.relu(last)
+    last = lm.conv_layer(last, 1, 1, 192, 'classifier/hidden/conv1mlp0', act=tf.nn.relu, **do_bn)
+    last = lm.conv_layer(last, 1, 1, 192, 'classifier/hidden/conv1mlp1', act=tf.nn.relu, **do_bn)
+    last = lm.max_pool(last, ksize=[1, 3, 3, 1], strides=[1, 2, 2, 1], padding='SAME')
+    last = dropout(last, drop_probs[1])
+
+    last = lm.conv_layer(last, 5, 5, 192, 'classifier/hidden/conv2', act=id_act, **do_bn)
+
+    logits.append(lm.nn_layer(tf.reshape(last, [-1, IMAGE_AREA*192//16]), 10, 'classifier/output/logits2', act=id_act, **do_bn))
+
+    last = tf.nn.relu(last)
+    last = lm.conv_layer(last, 1, 1, 192, 'classifier/hidden/conv2mlp0', act=tf.nn.relu, **do_bn)
+    last = lm.conv_layer(last, 1, 1, 10, 'classifier/hidden/conv2mlp1', act=id_act, **do_bn)
+    # Pool of size 6 rather than 8 as in DSN paper because tensorflow gives 24x24 images rather than 32x32
+    last = lm.avg_pool(last, ksize=[1, 6, 6, 1], strides=[1, 1, 1, 1], padding='VALID')
+
+    logits.append(tf.squeeze(last, name='classifier/output/logits3'))
+    return logits
 
 def full_model(lm, drop_probs, data, labels):
     output_logits = classifier(lm, data, drop_probs)
-    output_probs = tf.nn.softmax(output_logits)
 
     with tf.name_scope('error'):
-        cross_entropies = tf.nn.sparse_softmax_cross_entropy_with_logits(output_logits, labels)
-        cross_entropy = tf.reduce_mean(cross_entropies)
-        lm.summaries.scalar_summary('cross_entropy', cross_entropy)
-        incorrect_examples = tf.not_equal(tf.arg_max(output_logits, dimension=1), labels)
+        per_example_error = [multi_class_hinge_loss(out, labels, power=2) for out in output_logits]
+        batch_error = [tf.reduce_mean(ce) for ce in per_example_error]
+        for i, ce in enumerate(batch_error):
+            lm.summaries.scalar_summary('batch_error{}'.format(i), ce)
+        weight_decay = sum([tf.reduce_sum(t ** 2) for t in lm.weight_factory.variables])
+        lm.summaries.scalar_summary('weight_decay', weight_decay)
+        total_error = sum(batch_error)+0.001*weight_decay
+        lm.summaries.scalar_summary('total_error', total_error)
+        incorrect_examples = tf.not_equal(tf.cast(tf.arg_max(output_logits[-1], dimension=1), tf.int32), labels)
         percent_error = 100.0 * tf.reduce_mean(
             tf.cast(incorrect_examples, tf.float32))
         lm.summaries.scalar_summary('percent_error', percent_error)
 
-    return output_probs, cross_entropy, percent_error, cross_entropies, incorrect_examples
+    # Perhaps weights should be different on different layers
+    # Need to add alphas and gammas
+    return total_error, percent_error, per_example_error, incorrect_examples
 
 def train():
     print("\nSource code of training file {}:\n\n{}".format(__file__, open(__file__).read()))
 
-    log('loading MNIST')
+    log('loading CIFAR')
     # Import data
-    mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=False)
-    TRAIN_SIZE=mnist.train.images.shape[0]
+    training_batch = cifar10.distorted_inputs()
 
     lm = LayerManager(forward_biased_estimate=False)
     batch = tf.Variable(0)
 
     with tf.name_scope('input'):
-        all_train_data_initializer = tf.placeholder(tf.float32, [TRAIN_SIZE, IMAGE_AREA])
-        all_train_labels_initializer = tf.placeholder(tf.int64, [TRAIN_SIZE])
-        all_train_data = tf.Variable(all_train_data_initializer, trainable=False, collections=[])
-        all_train_labels = tf.Variable(all_train_labels_initializer, trainable=False, collections=[])
-        random_training_example = tf.train.slice_input_producer([all_train_data, all_train_labels])
-        training_batch = tf.train.batch(random_training_example, batch_size=BATCH_SIZE, enqueue_many=False)
-        fed_input_data = tf.placeholder(tf.float32, [None, IMAGE_AREA])
-        fed_input_labels = tf.placeholder(tf.int64, [None])
-        drop_probs = [tf.Variable(tf.constant(DEFAULT_KEEP_PROB, shape=[1, HIDDEN_LAYER_SIZE], dtype=tf.float32), trainable=False, collections=['Dropout']) for _ in range(NUM_HIDDEN_LAYERS)]
+        fed_input_data = tf.placeholder(tf.float32, [None, IMAGE_SIZE, IMAGE_SIZE, 3])
+        fed_input_labels = tf.placeholder(tf.int32, [None])
+        drop_probs = [tf.Variable(tf.constant(DEFAULT_KEEP_PROB, shape=[1, 1, 1, ], dtype=tf.float32), trainable=False, collections=['Dropout']) for _ in range(NUM_DROPOUT_LAYERS)]
 
     with tf.name_scope('posterior'):
-        training_output, training_cross_entropy, training_percent_error, _, _ = full_model(lm, drop_probs, *training_batch)
+        training_batch_error, _, _, _ = full_model(lm, drop_probs, *training_batch)
     training_merged = lm.summaries.merge_all_summaries()
     lm.is_training = False
     tf.get_variable_scope().reuse_variables()
     lm.summaries.reset()
     with tf.name_scope('test'):
-        test_output, test_cross_entropy, test_percent_error, test_cross_entropies, test_incorrect_examples = full_model(lm, drop_probs, fed_input_data, fed_input_labels)
-    test_merged = lm.summaries.merge_all_summaries()
+        _, test_percent_error, _, _ = full_model(lm, drop_probs, *cifar10.inputs(eval_data=True))
+    with tf.name_scope('forward'):
+        _, _, forward_per_example_error, forward_incorrect_examples = full_model(lm, drop_probs, fed_input_data, fed_input_labels)
+
+    def compute_test_percent_error():
+        return numpy.mean([sess.run([test_percent_error]) for _ in range(int(numpy.ceil(FLAGS.num_test_examples / FLAGS.batch_size)))])
 
     saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
 
     learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, batch, 5000, 0.8, staircase=True)
 
-    train_step = tf.train.AdamOptimizer(learning_rate).minimize(training_cross_entropy, global_step=batch, var_list=lm.weight_factory.variables + lm.bias_factory.variables + lm.scale_factory.variables)
+    train_step = tf.train.AdamOptimizer(learning_rate).minimize(training_batch_error, global_step=batch, var_list=lm.filter_factory.variables + lm.weight_factory.variables + lm.bias_factory.variables + lm.scale_factory.variables)
 
-    fed_drop_probs = tf.placeholder(tf.float32, [None, HIDDEN_LAYER_SIZE])
+    fed_drop_probs = tf.placeholder(tf.float32, [None, None, None, None])
     update_drop_probs = [tf.assign(drop_prob, fed_drop_probs, validate_shape=False) for drop_prob in drop_probs]
-
-    def feed_dict(mode):
-        """Make a TensorFlow feed_dict: maps data onto Tensor placeholders."""
-        if mode == 'test':
-            return {fed_input_data: mnist.test.images, fed_input_labels: mnist.test.labels}
-        else:
-            return {}
 
     with tf.Session() as sess:
         sess.run(tf.initialize_all_variables())
-        sess.run([all_train_data.initializer, all_train_labels.initializer], feed_dict={all_train_data_initializer: mnist.train.images, all_train_labels_initializer: mnist.train.labels})
         sess.run(tf.initialize_variables(tf.get_collection('BatchNormInternal')))
         sess.run(tf.initialize_variables(tf.get_collection('Dropout')))
 
@@ -207,30 +208,28 @@ def train():
 
         if TRAIN:
             train_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/train', sess.graph)
-            test_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/test')
+            # test_writer = tf.train.SummaryWriter(FLAGS.summaries_dir + '/test')
             try:
                 log('starting training')
                 for i in range(FLAGS.max_steps):
                     if i % 1000 == 999: # Do test set
-                        summary, err = sess.run([test_merged, test_percent_error], feed_dict=feed_dict('test'))
-                        test_writer.add_summary(summary, i)
-                        for j in range(NUM_HIDDEN_LAYERS):
-                            sess.run([update_drop_probs[j]], feed_dict={fed_drop_probs: numpy.ones((1,HIDDEN_LAYER_SIZE))})
-                        det_err, = sess.run([test_percent_error], feed_dict=feed_dict('test'))
-                        for j in range(NUM_HIDDEN_LAYERS):
-                            sess.run([update_drop_probs[j]], feed_dict={fed_drop_probs: DEFAULT_KEEP_PROB * numpy.ones((1, HIDDEN_LAYER_SIZE))})
+                        err = compute_test_percent_error()
+                        for j in range(NUM_DROPOUT_LAYERS):
+                            sess.run([update_drop_probs[j]], feed_dict={fed_drop_probs: [[[[1.0]]]]})
+                        det_err = compute_test_percent_error()
+                        for j in range(NUM_DROPOUT_LAYERS):
+                            sess.run([update_drop_probs[j]], feed_dict={fed_drop_probs: [[[[DEFAULT_KEEP_PROB]]]]})
                         log('batch %s: Random test classification error = %s%%, deterministic test classification error = %s%%' % (i, err, det_err))
                     if i % 100 == 99: # Record a summary
                         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                         run_metadata = tf.RunMetadata()
                         summary, _ = sess.run([training_merged, train_step],
-                                              feed_dict=feed_dict('train'),
                                               options=run_options,
                                               run_metadata=run_metadata)
                         train_writer.add_summary(summary, i)
                         train_writer.add_run_metadata(run_metadata, 'batch%d' % i)
                     else:
-                        sess.run([train_step], feed_dict=feed_dict('train'))
+                        sess.run([train_step])
             finally:
                 log('saving')
                 saver.save(sess, FLAGS.train_dir, global_step=batch)
@@ -242,7 +241,7 @@ def train():
             # NUM_RUNS = 10
             # runs = []
             # for _ in range(NUM_RUNS):
-            #     new_output_probs, = sess.run([test_output], feed_dict={fed_input_data: mnist.train.images, fed_input_labels: mnist.train.labels})
+            #     new_output_probs, = sess.run([forward_output], feed_dict={fed_input_data: mnist.train.images, fed_input_labels: mnist.train.labels})
             #     new_output = numpy.argmax(new_output_probs, 1)
             #     runs.append(new_output)
             #
@@ -250,17 +249,17 @@ def train():
             # entropy = numpy.array([scipy.stats.entropy(numpy.bincount(row), base=2.0) for row in all_runs])
 
 
-            derandomized_drop_probs = [DEFAULT_KEEP_PROB * numpy.ones((1, HIDDEN_LAYER_SIZE)) for _ in range(NUM_HIDDEN_LAYERS)]
+            derandomized_drop_probs = [DEFAULT_KEEP_PROB * numpy.ones((1, HIDDEN_LAYER_SIZE)) for _ in range(NUM_DROPOUT_LAYERS)]
 
             num_tests_performed = 0
 
             for pass_count in range(1):
                 for j in range(HIDDEN_LAYER_SIZE):
-                    for i in range(NUM_HIDDEN_LAYERS):  # range(NUM_HIDDEN_LAYERS-1,-1,-1):
+                    for i in range(NUM_DROPOUT_LAYERS):  # range(NUM_DROPOUT_LAYERS-1,-1,-1):
                         if derandomized_drop_probs[i][0, j] == 0.0 or derandomized_drop_probs[i][0, j] == 1.0:
                             continue
                         num_tests_performed += 1
-                        for k in range(NUM_HIDDEN_LAYERS):
+                        for k in range(NUM_DROPOUT_LAYERS):
                             if k == i:
                                 # curr_drop_probs = numpy.tile(derandomized_drop_probs[i], (BATCHES_PER_DERANDOMIZE_STEP*BATCH_SIZE, 1))
                                 # to_randomize = HIDDEN_LAYER_SIZE - j - 1
@@ -283,16 +282,16 @@ def train():
                         # examples = mnist.train.images[indices, :]
                         # labels = mnist.train.labels[indices]
                         # Collect a bunch of 64-example batches together
-                        examples, labels = [numpy.concatenate(things, axis=0) for things in zip(*[sess.run(training_batch, feed_dict={}) for _ in range(BATCHES_PER_DERANDOMIZE_STEP)])]
+                        examples, labels = [numpy.concatenate(things, axis=0) for things in zip(*[sess.run(training_batch) for _ in range(BATCHES_PER_DERANDOMIZE_STEP)])]
 
                         # Might want to use cross entropy, but why not not use percent error since we're not differentiating?
                         # Using "test" expressions so we can manually feed in data, but we are feeding training data (same data for obj0 and obj1)
-                        err0, cross_entropies0 = sess.run([test_incorrect_examples, test_cross_entropies], feed_dict={fed_input_data: examples, fed_input_labels: labels})
+                        err0, cross_entropies0 = sess.run([forward_incorrect_examples, forward_per_example_error], feed_dict={fed_input_data: examples, fed_input_labels: labels})
                         curr_drop_probs[:, j] = 1.0
                         # curr_drop_probs[:, j+1:] = (randperms < to_keep - 1)
                         # curr_drop_probs[:, j+1:j+2] = 0.0
                         sess.run([update_drop_probs[i]], feed_dict={fed_drop_probs: curr_drop_probs})
-                        err1, cross_entropies1 = sess.run([test_incorrect_examples, test_cross_entropies], feed_dict={fed_input_data: examples, fed_input_labels: labels})
+                        err1, cross_entropies1 = sess.run([forward_incorrect_examples, forward_per_example_error], feed_dict={fed_input_data: examples, fed_input_labels: labels})
 
                         # One-sided paired-sample t-test
                         cross_entropy_diff = cross_entropies0 - cross_entropies1
@@ -334,7 +333,7 @@ def train():
                         #log(neuron_status + ' L{} N{}: b + c = {}, {}'.format(i, j, b+c, stat_message))
                         log(neuron_status + ' P{} L{} N{}: b = {}, c = {}, p = {}'.format(pass_count, i, j, b, c, p))
                         derandomized_drop_probs[i][0, j] = new_drop_prob
-                for i in range(NUM_HIDDEN_LAYERS):
+                for i in range(NUM_DROPOUT_LAYERS):
                     num_dropped = (derandomized_drop_probs[i] == 0.0).sum()
                     num_kept = (derandomized_drop_probs[i] == 1.0).sum()
                     num_hmmm = HIDDEN_LAYER_SIZE - num_dropped - num_kept
@@ -348,7 +347,7 @@ def train():
         else:
             restore_latest(saver, sess, '/tmp/derandomizing_dropout', suffix='-100001')
 
-        err, = sess.run([test_percent_error], feed_dict=feed_dict('test'))
+        err, = compute_test_percent_error()
         log('Test classification error = %s%%' % err)
 
         coord.request_stop()
@@ -362,12 +361,9 @@ def main(_):
     train()
 
 if __name__ == '__main__':
-    flags = tf.app.flags
-    FLAGS = flags.FLAGS
     flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
-    flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
-    flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
+    flags.DEFINE_float('learning_rate', 0.01, 'Initial learning rate.')
     flags.DEFINE_string('summaries_dir', '/tmp/derandomizing_dropout/logs', 'Summaries directory')
     flags.DEFINE_string('train_dir', '/tmp/derandomizing_dropout/save', 'Saves directory')
-
+    flags.DEFINE_integer('num_test_examples', 10000, """Number of examples to run.""")
     tf.app.run()

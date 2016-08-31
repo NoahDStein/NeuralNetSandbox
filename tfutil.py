@@ -171,6 +171,11 @@ class LayerManager(object):
             [tf.nn.max_pool(t, *args, **kwargs) for t in listify(value)],
             reduction_indices=[0])
 
+    def avg_pool(self, value, *args, **kwargs):
+        return tf.reduce_mean(
+            [tf.nn.avg_pool(t, *args, **kwargs) for t in listify(value)],
+            reduction_indices=[0])
+
     def reparam_normal_sample(self, mean, log_std, layer_name):
         with tf.name_scope(layer_name):
             prior_sample = tf.random_normal(tf.shape(mean))
@@ -208,6 +213,16 @@ class LayerManager(object):
             variance = mt.tracked_variance
         return tf.nn.batch_normalization(input_tensor, mean, variance, None, None, 1e-3)
 
+# Not averaged over examples
+def multi_class_hinge_loss(inner_products, labels, power=1):
+    membership_indicator = tf.one_hot(labels, tf.shape(inner_products)[1], on_value=1.0, off_value=-1.0)
+    hinge_loss = tf.nn.relu(1.0 - membership_indicator * inner_products)
+    if power !=1:
+        if power == 2:
+            hinge_loss = tf.square(hinge_loss)
+        else:
+            hinge_loss = tf.pow(hinge_loss, power)
+    return tf.reduce_sum(hinge_loss, reduction_indices=[1])
 
 def log(s):
     print('[%s] ' % time.asctime() + s)

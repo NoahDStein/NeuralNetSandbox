@@ -256,7 +256,7 @@ def train():
 
     learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, batch, 5000, 0.8, staircase=True)
 
-    train_step = tf.train.AdamOptimizer(learning_rate).minimize(error, global_step=batch, var_list=lm.weight_factory.variables + lm.bias_factory.variables + lm.scale_factory.variables)
+    train_step = tf.train.AdamOptimizer(learning_rate).minimize(error, global_step=batch, var_list=lm.filter_factory.variables + lm.weight_factory.variables + lm.bias_factory.variables + lm.scale_factory.variables)
 
     def feed_dict(mode):
         """Make a TensorFlow feed_dict: maps data onto Tensor placeholders."""
