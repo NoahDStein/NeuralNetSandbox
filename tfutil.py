@@ -236,3 +236,24 @@ def restore_latest(saver, sess, path, suffix=''):
     newest = dated_files[0][1]
     log('restoring %s updated at %s' % (dated_files[0][1], time.ctime(dated_files[0][0])))
     saver.restore(sess, path + '/' + newest)
+
+
+def roll0d(tensor, shift):  # tensor must be 0-d
+    n = tensor.get_shape()[0]
+    if shift >= 0:
+        z = tf.concat(concat_dim=0, values=[tf.gather(tensor, indices=tf.range(n-shift, n)), \
+                                           tf.gather(tensor, indices=tf.range(n-shift))])
+    else:
+        z = tf.concat(concat_dim=0, values=[tf.gather(tensor, indices=tf.range(-shift, n)), \
+                                           tf.gather(tensor, indices=tf.range(-shift))])
+    return z
+
+
+def tensor_roll_scalar(tensor, shift, axis, ndim):  # roll a tensor by a scalar argument
+    dims = numpy.arange(ndim)
+    if axis != 0:
+        dims[axis], dims[0] = dims[0], dims[axis]
+        permuted_tensor = tf.transpose(tensor, perm=dims)
+    else:
+        permuted_tensor = tensor
+    return tf.transpose(roll0d(permuted_tensor, shift), perm=dims)
