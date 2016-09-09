@@ -8,17 +8,22 @@ import matplotlib.pyplot as plt
 import os, sys
 import time
 import matplotlib, seaborn
-
+from sklearn import manifold
+import pickle
 from tfutil import LayerManager
+nets_dir = './nets'
 file_name = os.path.splitext(os.path.basename(__file__))[0]
 flags = tf.app.flags
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
 flags.DEFINE_float('learning_rate', 0.0003, 'Initial learning rate.')
-flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
-flags.DEFINE_string('summaries_dir', '/tmp/%s/logs' % file_name, 'Summaries directory')
-flags.DEFINE_string('train_dir', '/tmp/%s/save' % file_name, 'Saves directory')
-flags.DEFINE_string('viz_dir', '/tmp/%s/viz' % file_name, 'Viz directory')
+flags.DEFINE_string('data_dir', '%s/%s/data' % (nets_dir, file_name), 'Directory for storing data')
+flags.DEFINE_string('summaries_dir', '%s/%s/logs' % (nets_dir, file_name), 'Summaries directory')
+flags.DEFINE_string('train_dir', '%s/%s/save' % (nets_dir, file_name), 'Saves directory')
+flags.DEFINE_string('viz_dir', '%s/%s/viz' % (nets_dir, file_name), 'Viz directory')
+for d in [FLAGS.data_dir, FLAGS.summaries_dir, FLAGS.train_dir, FLAGS.viz_dir]:
+    if not os.path.exists(d):
+        os.makedirs(d)
 
 TRAIN_SIZE = 60000
 TEST_SIZE = 10000
@@ -29,7 +34,7 @@ PRIOR_BATCH_SIZE = 5
 PRETRAIN = False
 TRAIN = False
 
-LATENT_DIM = 2
+LATENT_DIM = 10
 NUM_HIDDEN_LAYERS = 3
 HIDDEN_LAYER_SIZE = 200
 
@@ -53,10 +58,10 @@ def train():
     test_data = rand_periodic(NUM_COMPONENTS, TEST_SIZE, SIG_LEN)
     if TRAIN:
         train_data = rand_periodic(NUM_COMPONENTS, TRAIN_SIZE, SIG_LEN)
-        numpy.save('%s/%s_train_data.npy' % (FLAGS.data_dir, file_name), train_data)
+        numpy.save('%s/train_data.npy' % FLAGS.data_dir, train_data)
 
     else: # Don't waste time computing training data
-        train_data = numpy.load('%s/%s_train_data.npy' % (FLAGS.data_dir, file_name))
+        train_data = numpy.load('%s/train_data.npy' % FLAGS.data_dir)
     log('done simulating')
 
     lm = LayerManager()
@@ -268,6 +273,22 @@ def train():
                 plt.savefig('%s/Q(z|X%s).png' % (FLAGS.viz_dir, tag))
                 return fig, ax
 
+            def plot_embedding(X, title=None):
+                # embeddings are initialization and data dependent, so it's not obvious two can be meaningfully compared
+                x_min, x_max = numpy.min(X, 0), numpy.max(X, 0)
+                X = (X - x_min) / (x_max - x_min)
+                plt.figure()
+                ax = plt.subplot(111)
+                ax.scatter(X[:, 0], X[:, 1])
+                # plt.xticks([]), plt.yticks([])
+                ax.set_xlabel('tnse axis 1')
+                ax.set_ylabel('tnse axis 2')
+                if title is not None:
+                    plt.title(title)
+
+            def subsample_data(data, N):  # randomly sample N elements of data
+                return data[numpy.random.permutation(numpy.arange(data.shape[0]))[:N], :]
+
             # viz
             log('restoring')
             saver.restore(sess, FLAGS.train_dir + '-' + str(FLAGS.max_steps))
@@ -276,17 +297,32 @@ def train():
             fig = plt.figure()
             ax = fig.add_subplot(111)
             plot_prior()
+            latent, latent_log_std = encoder(fed_input_data)
+            latents_test, = sess.run([latent], feed_dict=feed_dict('test'))
+            latents_train = numpy.array(sess.run([latent], feed_dict={fed_input_data: train_data})).squeeze()
             if LATENT_DIM == 2:
                 f, a = decode_uniform_samples_from_latent_space(10, show_ticks=True)
                 plt.close(f)
-                latent, latent_log_std = encoder(fed_input_data)
-                # fd = feed_dict('train')
-                # fd['fed_input_data']
-                # latents, = sess.run([latent], feed_dict=feed_dict('train'))
-                # latent_2d_scatter(latents=latents, labels=None, tag='_train')
-                latent, latent_log_std = encoder(fed_input_data)
-                latents, = sess.run([latent], feed_dict=feed_dict('test'))
-                latent_2d_scatter(latents=latents, labels=None, tag='_test')
+                for t, l in zip(['train', 'test'], [latents_train, latents_test]):
+                    latent_2d_scatter(latents=l, labels=None, tag='_%s' % t)
+            else:
+                latents_train_subsample = subsample_data(latents_train, latents_test.shape[0])  # tsne doesn't do well with N > 10000
+                for t, l in zip(['test', 'train_subsample'], [latents_test, latents_train_subsample]):
+                    if os.path.exists('%s/tsne_%s.npz' % (FLAGS.train_dir, t)):
+                        z = numpy.load(open('%s/tsne_%s.pkl' % (FLAGS.train_dir, t), 'rb'))
+                        X_tsne = z['embedding']
+                        time_elapsed = z['embedding']
+                    else:
+                        tsne = manifold.TSNE(n_components=2, init='pca', random_state=0)
+                        t0 = time.time()
+                        X_tsne = tsne.fit_transform(l)
+                        time_elapsed = t0 - time.time()
+                        pickle.dump({'embedding': X_tsne, 'time_elapsed': time_elapsed}, open('%s/tsne.pkl' % FLAGS.train_dir, 'wb'))
+                    plot_embedding(X_tsne,
+                                   "t-SNE embedding of the %s data (time %.2fs)" %
+                                   (t, time_elapsed))
+                    plt.savefig('%s/tsne_%s.png' % (FLAGS.viz_dir, t))
+                    plt.show()
             print('viz at %s' % FLAGS.viz_dir)
         coord.request_stop()
         coord.join(threads)

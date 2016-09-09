@@ -1,3 +1,5 @@
 *.pyc
 .idea
 hacking/*
+nets/*
+.DS_STORE

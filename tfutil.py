@@ -238,7 +238,7 @@ def restore_latest(saver, sess, path, suffix=''):
     saver.restore(sess, path + '/' + newest)
 
 
-def roll0d(tensor, shift):  # tensor must be 0-d
+def roll0d(tensor, shift):  # roll tensor along 0th dimension
     n = tensor.get_shape()[0]
     if shift >= 0:
         z = tf.concat(concat_dim=0, values=[tf.gather(tensor, indices=tf.range(n-shift, n)), \
