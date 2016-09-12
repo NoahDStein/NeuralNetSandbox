@@ -218,7 +218,7 @@ def train():
             try:
                 log('starting training')
                 for i in range(FLAGS.max_steps):
-                    if i % 1000 == 0:
+                    if i % 1000 == 999:
                         # Track training error
                         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                         run_metadata = tf.RunMetadata()
