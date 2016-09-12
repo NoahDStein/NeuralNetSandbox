@@ -5,18 +5,25 @@ from __future__ import print_function
 import numpy
 import tensorflow as tf
 import matplotlib.pyplot as plt
-
+import os, sys
 import time
-
+import matplotlib, seaborn
+from sklearn import manifold
+import pickle
 from tfutil import LayerManager
-
+nets_dir = './nets'
+file_name = os.path.splitext(os.path.basename(__file__))[0]
 flags = tf.app.flags
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
 flags.DEFINE_float('learning_rate', 0.0003, 'Initial learning rate.')
-flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
-flags.DEFINE_string('summaries_dir', '/tmp/attn_vae/logs', 'Summaries directory')
-flags.DEFINE_string('train_dir', '/tmp/attn_vae/save', 'Saves directory')
+flags.DEFINE_string('data_dir', '%s/%s/data' % (nets_dir, file_name), 'Directory for storing data')
+flags.DEFINE_string('summaries_dir', '%s/%s/logs' % (nets_dir, file_name), 'Summaries directory')
+flags.DEFINE_string('train_dir', '%s/%s/save' % (nets_dir, file_name), 'Saves directory')
+flags.DEFINE_string('viz_dir', '%s/%s/viz' % (nets_dir, file_name), 'Viz directory')
+for d in [FLAGS.data_dir, FLAGS.summaries_dir, FLAGS.train_dir, FLAGS.viz_dir]:
+    if not os.path.exists(d):
+        os.makedirs(d)
 
 TRAIN_SIZE = 60000
 TEST_SIZE = 10000
@@ -25,9 +32,9 @@ NUM_COMPONENTS = 3
 BATCH_SIZE = 64
 PRIOR_BATCH_SIZE = 5
 PRETRAIN = False
-TRAIN = True
+TRAIN = False
 
-LATENT_DIM = 20
+LATENT_DIM = 10
 NUM_HIDDEN_LAYERS = 3
 HIDDEN_LAYER_SIZE = 200
 
@@ -51,11 +58,15 @@ def train():
     test_data = rand_periodic(NUM_COMPONENTS, TEST_SIZE, SIG_LEN)
     if TRAIN:
         train_data = rand_periodic(NUM_COMPONENTS, TRAIN_SIZE, SIG_LEN)
+        numpy.save('%s/train_data.npy' % FLAGS.data_dir, train_data)
+
     else: # Don't waste time computing training data
-        train_data = numpy.zeros((TRAIN_SIZE, SIG_LEN))
+        train_data = numpy.load('%s/train_data.npy' % FLAGS.data_dir)
     log('done simulating')
 
     lm = LayerManager()
+
+    prior_batch_size = tf.placeholder(tf.int64, [])
 
     with tf.name_scope('input'):
         all_train_data_initializer = tf.placeholder(tf.float32, [TRAIN_SIZE, SIG_LEN])
@@ -123,14 +134,18 @@ def train():
         rough_error = tf.reduce_mean(tf.square(tf.reduce_mean(tf.square(output_mean), reduction_indices=[1]) - tf.reduce_mean(tf.square(data), reduction_indices=[1])))
         return output_mean, likelihood_bound, rough_error
 
-    def prior_model():
-        latent_sample = tf.random_normal((PRIOR_BATCH_SIZE, LATENT_DIM))
-        output_mean, output_log_std = decoder(latent_sample)
 
+    def prior_model(latent=None):  # option to call with latent as numpy array of shape 1xLATENT_DIM
+        if latent is None:
+            latent = tf.random_normal((prior_batch_size, LATENT_DIM))
+        else:
+            latent = tf.convert_to_tensor(latent, dtype=tf.float32)
+        output_mean_logit, output_log_std = decoder(latent)
+        output_mean = tf.nn.sigmoid(output_mean_logit)
         num_copies = 255
         image = tf.tile(tf.expand_dims(output_mean, 1), [1, num_copies, 1])
         sample_image = lm.summaries.image_summary('prior_sample', tf.expand_dims(image, -1), 5)
-        return output_mean, sample_image
+        return output_mean, sample_image  # for now, do nothing with std dev
 
     with tf.name_scope('posterior'):
         posterior_mean, likelihood_bound, rough_error = full_model(training_batch)
@@ -155,9 +170,9 @@ def train():
     def feed_dict(mode):
         """Make a TensorFlow feed_dict: maps data onto Tensor placeholders."""
         if mode == 'test':
-            return {fed_input_data: test_data}
+            return {fed_input_data: test_data, prior_batch_size: PRIOR_BATCH_SIZE}
         else:
-            return {}
+            return {prior_batch_size: PRIOR_BATCH_SIZE}
 
     with tf.Session() as sess:
         sess.run(tf.initialize_all_variables())
@@ -200,23 +215,119 @@ def train():
                 saver.save(sess, FLAGS.train_dir, global_step=batch)
                 log('done')
         else:
+            # viz fns
+            def plot_prior(n_priors=10):
+                for i in xrange(n_priors):
+                    prior_means, = sess.run([prior_mean], feed_dict=feed_dict('prior'))
+                    plt.cla()
+                    ax.plot(prior_means[0, :])
+                    plt.draw()
+                    cid = fig.canvas.mpl_connect('button_press_event', plot_prior)
+                    plt.show()
+                    plt.savefig('%s/plot_prior%d.png' % (FLAGS.viz_dir, i))
+                    fig.canvas.mpl_disconnect(cid)
+                return
+
+            def decode_uniform_samples_from_latent_space(N=20, show_ticks=False):
+                nx = ny = N
+                with seaborn.axes_style('ticks'):
+                    fig, ax = plt.subplots(nx, ny, figsize=(12, 12))
+                extent_x = extent_y = [-3, 3]
+                extent = numpy.array(extent_x + extent_y)
+                x_values = numpy.linspace(*(extent_x + [nx]))
+                y_values = numpy.linspace(*(extent_y + [nx]))
+                full_extent = extent * (nx + 1) / float(nx)
+                canvas = numpy.empty((28 * ny, 28 * nx))
+                for ii, yi in enumerate(x_values):
+                    for j, xi in enumerate(y_values):
+                        n = ii * nx + j + 1
+                        sys.stdout.write("\rsampling p(X|z), sample %d/%d" % (n, nx*ny))
+                        sys.stdout.flush()
+                        np_z = numpy.array([[xi, yi]])
+                        x_mean = sess.run(prior_model(latent=numpy.reshape(np_z, newshape=(1, LATENT_DIM)))[0])
+                        ax[ii, j].plot(x_mean.T)
+                        ax[ii, j].set_xlim([0, SIG_LEN])
+                        ax[ii, j].set_ylim([-1, 1])
+                        ax[ii, j].set_title('(z1,z2)=(%d,%d)' % (ii, j))
+                        if not show_ticks:
+                            ax[ii, j].xaxis.set_ticklabels([])
+                            ax[ii, j].yaxis.set_ticklabels([])
+                plt.suptitle('P(X_mean|z); decoding latent space')
+                plt.show()
+                plt.savefig(os.path.join(FLAGS.viz_dir, 'P(X|z).png'))
+                return fig, ax
+
+            def latent_2d_scatter(latents, labels, tag=''):  # if latent space is 2d we can visualize encoded data directly
+                fig, ax = plt.subplots(figsize=(12, 9))
+                cmap = None  # todo: color data by some simple feature, e.g. max bin in fft?
+                order = numpy.random.permutation(xrange(latents.shape[0]))
+                im = ax.scatter(latents[order, 0], latents[order, 1])  # c=labels[order], cmap=cmap
+                ax.set_xlabel('z_1')
+                ax.set_ylabel('z_2')
+                ax.set_title('Q(z|X%s)' % tag)
+                lims = [-5, 5]
+                ax.set_xlim(*lims)
+                ax.set_ylim(*lims)
+                # f.colorbar(im, ax=ax)
+                plt.show()
+                plt.savefig('%s/Q(z|X%s).png' % (FLAGS.viz_dir, tag))
+                return fig, ax
+
+            def plot_embedding(X, title=None):
+                # embeddings are initialization and data dependent, so it's not obvious two can be meaningfully compared
+                x_min, x_max = numpy.min(X, 0), numpy.max(X, 0)
+                X = (X - x_min) / (x_max - x_min)
+                plt.figure()
+                ax = plt.subplot(111)
+                ax.scatter(X[:, 0], X[:, 1])
+                # plt.xticks([]), plt.yticks([])
+                ax.set_xlabel('tnse axis 1')
+                ax.set_ylabel('tnse axis 2')
+                if title is not None:
+                    plt.title(title)
+
+            def subsample_data(data, N):  # randomly sample N elements of data
+                return data[numpy.random.permutation(numpy.arange(data.shape[0]))[:N], :]
+
+            # viz
             log('restoring')
             saver.restore(sess, FLAGS.train_dir + '-' + str(FLAGS.max_steps))
+            if not os.path.exists(FLAGS.viz_dir):
+                os.makedirs(FLAGS.viz_dir)
             fig = plt.figure()
             ax = fig.add_subplot(111)
-            def plot_prior(_):
-                prior_means, = sess.run([prior_mean], feed_dict=feed_dict('prior'))
-                plt.cla()
-                ax.plot(prior_means[0, :])
-                plt.draw()
-            plot_prior(None)
-            cid = fig.canvas.mpl_connect('button_press_event', plot_prior)
-            plt.show()
-            fig.canvas.mpl_disconnect(cid)
-
+            plot_prior()
+            latent, latent_log_std = encoder(fed_input_data)
+            latents_test, = sess.run([latent], feed_dict=feed_dict('test'))
+            latents_train = numpy.array(sess.run([latent], feed_dict={fed_input_data: train_data})).squeeze()
+            if LATENT_DIM == 2:
+                f, a = decode_uniform_samples_from_latent_space(10, show_ticks=True)
+                plt.close(f)
+                for t, l in zip(['train', 'test'], [latents_train, latents_test]):
+                    latent_2d_scatter(latents=l, labels=None, tag='_%s' % t)
+            else:
+                latents_train_subsample = subsample_data(latents_train, latents_test.shape[0])  # tsne doesn't do well with N > 10000
+                for t, l in zip(['test', 'train_subsample'], [latents_test, latents_train_subsample]):
+                    if os.path.exists('%s/tsne_%s.npz' % (FLAGS.train_dir, t)):
+                        z = numpy.load(open('%s/tsne_%s.pkl' % (FLAGS.train_dir, t), 'rb'))
+                        X_tsne = z['embedding']
+                        time_elapsed = z['embedding']
+                    else:
+                        tsne = manifold.TSNE(n_components=2, init='pca', random_state=0)
+                        t0 = time.time()
+                        X_tsne = tsne.fit_transform(l)
+                        time_elapsed = t0 - time.time()
+                        pickle.dump({'embedding': X_tsne, 'time_elapsed': time_elapsed}, open('%s/tsne.pkl' % FLAGS.train_dir, 'wb'))
+                    plot_embedding(X_tsne,
+                                   "t-SNE embedding of the %s data (time %.2fs)" %
+                                   (t, time_elapsed))
+                    plt.savefig('%s/tsne_%s.png' % (FLAGS.viz_dir, t))
+                    plt.show()
+            print('viz at %s' % FLAGS.viz_dir)
         coord.request_stop()
         coord.join(threads)
         sess.close()
+
 
 def main(_):
     if tf.gfile.Exists(FLAGS.summaries_dir):

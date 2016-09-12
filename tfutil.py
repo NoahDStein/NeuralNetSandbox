@@ -259,3 +259,24 @@ def modified_dynamic_shape(tensor, new_shape):
 
 def modified_static_shape(tensor, new_shape):
     return tuple(new_dim or tensor.get_shape().as_list()[i] for i, new_dim in enumerate(new_shape))
+
+
+def roll0d(tensor, shift):  # roll tensor along 0th dimension
+    n = tensor.get_shape()[0]
+    if shift >= 0:
+        z = tf.concat(concat_dim=0, values=[tf.gather(tensor, indices=tf.range(n-shift, n)), \
+                                           tf.gather(tensor, indices=tf.range(n-shift))])
+    else:
+        z = tf.concat(concat_dim=0, values=[tf.gather(tensor, indices=tf.range(-shift, n)), \
+                                           tf.gather(tensor, indices=tf.range(-shift))])
+    return z
+
+
+def tensor_roll_scalar(tensor, shift, axis, ndim):  # roll a tensor by a scalar argument
+    dims = numpy.arange(ndim)
+    if axis != 0:
+        dims[axis], dims[0] = dims[0], dims[axis]
+        permuted_tensor = tf.transpose(tensor, perm=dims)
+    else:
+        permuted_tensor = tensor
+    return tf.transpose(roll0d(permuted_tensor, shift), perm=dims)

@@ -2,3 +2,5 @@
 .idea
 hacking/*
 data
+nets/*
+.DS_STORE
