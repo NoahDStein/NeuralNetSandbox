@@ -99,12 +99,16 @@ class VariableFactory(object):
 
 
 class LayerManager(object):
-    def __init__(self, forward_biased_estimate=False, is_training=True):
+    def __init__(self, forward_biased_estimate=False, is_training=True, auto_summaries=True):
         self.summaries = SummaryAccumulator()
-        self.weight_factory = VariableFactory(init=OrthogonalInit(), summaries=self.summaries)
-        self.filter_factory = VariableFactory(init=RandomInit(0.1), summaries=self.summaries)
-        self.bias_factory = VariableFactory(init=ConstantInit(0.0), summaries=self.summaries)
-        self.scale_factory = VariableFactory(init=ConstantInit(numpy.log(numpy.exp(1)-1)), summaries=self.summaries)
+        if auto_summaries:
+            var_summaries = self.summaries
+        else:
+            var_summaries = None
+        self.weight_factory = VariableFactory(init=OrthogonalInit(), summaries=var_summaries)
+        self.filter_factory = VariableFactory(init=RandomInit(0.1), summaries=var_summaries)
+        self.bias_factory = VariableFactory(init=ConstantInit(0.0), summaries=var_summaries)
+        self.scale_factory = VariableFactory(init=ConstantInit(numpy.log(numpy.exp(1)-1)), summaries=var_summaries)
         self.is_training = is_training
         self.forward_biased_estimate = forward_biased_estimate
 
@@ -116,17 +120,28 @@ class LayerManager(object):
             layer_name = tf.get_variable_scope().name
             preactivate = 0.0
             input_tensor = listify(input_tensor)
+            extra_dims = len(input_tensor[0].get_shape()) - 2
+
             for i in range(len(input_tensor)):
-                input_dim = input_tensor[i].get_shape().as_list()[1]
+                input_dim = input_tensor[i].get_shape().as_list()[-1]
                 weights = self.weight_factory.get_variable('weight{}'.format(i), [input_dim, output_dim])
-                preactivate = preactivate + tf.matmul(input_tensor[i], weights)
+                if extra_dims == 0:
+                    preactivate = preactivate + tf.matmul(input_tensor[i], weights)
+                else:
+                    shape = input_tensor[i].get_shape()
+                    reshaped_input = tf.reshape(input_tensor[i], [-1, input_dim])
+                    product = tf.matmul(reshaped_input, weights)
+                    new_shape = shape.as_list()
+                    new_shape[0] = -1
+                    new_shape[-1] = output_dim
+                    preactivate = preactivate + tf.reshape(product, new_shape)
             if bn:
-                preactivate = self.batch_normalization(preactivate, layer_name + '/bn')
+                preactivate = self.batch_normalization(preactivate, layer_name + '/bn', normalization_indices=list(range(extra_dims + 1)))
             if scale:
                 scale_var = self.scale_factory.get_variable('scale{}'.format(i), [1])
                 preactivate = tf.nn.softplus(scale_var)*preactivate
             if bias:
-                bias_var = self.bias_factory.get_variable('bias', [output_dim])
+                bias_var = self.bias_factory.get_variable('bias', [1] * extra_dims + [output_dim])
                 preactivate = preactivate+bias_var
             self.summaries.histogram_summary(layer_name + '/pre_activations', preactivate)
             activations = act(preactivate)
@@ -138,7 +153,7 @@ class LayerManager(object):
             return activations
 
 
-    def conv_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, scale=None, bias=True, bn=False):
+    def conv_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', scale=None, bias=True, bn=False):
         if scale is None:
             scale = bn  # scale should default to True for bn and False otherwise
         with tf.variable_scope(scope):
@@ -148,7 +163,7 @@ class LayerManager(object):
             for i in range(len(input_tensor)):
                 num_channels_in = input_tensor[i].get_shape().as_list()[3]
                 filters = self.filter_factory.get_variable('filter{}'.format(i), [filter_height, filter_width, num_channels_in, num_filters])
-                preactivate = preactivate + tf.nn.conv2d(input_tensor[i], filters, strides=[1, 1, 1, 1], padding='SAME')
+                preactivate = preactivate + tf.nn.conv2d(input_tensor[i], filters, strides=[1, 1, 1, 1], padding=padding)
             if bn:
                 preactivate = self.batch_normalization(preactivate, layer_name + '/bn', normalization_indices=[0, 1, 2])
             if scale:
@@ -236,3 +251,11 @@ def restore_latest(saver, sess, path, suffix=''):
     newest = dated_files[0][1]
     log('restoring %s updated at %s' % (dated_files[0][1], time.ctime(dated_files[0][0])))
     saver.restore(sess, path + '/' + newest)
+
+
+def modified_dynamic_shape(tensor, new_shape):
+    return tuple(new_dim or tf.shape(tensor)[i] for i, new_dim in enumerate(new_shape))
+
+
+def modified_static_shape(tensor, new_shape):
+    return tuple(new_dim or tensor.get_shape().as_list()[i] for i, new_dim in enumerate(new_shape))
