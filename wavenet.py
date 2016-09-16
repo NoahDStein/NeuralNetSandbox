@@ -12,7 +12,7 @@ from tfutil import LayerManager, restore_latest, modified_dynamic_shape
 flags = tf.app.flags
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('max_steps', 100000, 'Number of steps to run trainer.')
-flags.DEFINE_float('learning_rate', 0.0001, 'Initial learning rate.')
+flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
 flags.DEFINE_string('data_dir', '/tmp/data', 'Directory for storing data')
 flags.DEFINE_string('summaries_dir', 'data/wavenet/logs', 'Summaries directory')
 flags.DEFINE_string('train_dir', 'data/wavenet/save', 'Saves directory')
@@ -26,9 +26,8 @@ PRIOR_BATCH_SIZE = 5
 RESTORE_BEFORE_TRAIN = False
 TRAIN = True
 
-NUM_HIDDEN_LAYERS = 5
-RES_LAYERS = 8
 HIDDEN_LAYER_SIZE = 32
+DELAYS = [1, 2, 4, 8, 16] * 4
 
 QUANT_LEVELS = 256
 QUANT_LOWER = -10.0
@@ -83,10 +82,7 @@ def train():
 
     numpy.random.seed(3737)
     test_data = rand_periodic(NUM_COMPONENTS, TEST_SIZE, SIG_LEN)
-    if TRAIN:
-        train_data = rand_periodic(NUM_COMPONENTS, TRAIN_SIZE, SIG_LEN)
-    else: # Don't waste time computing training data
-        train_data = numpy.zeros((TRAIN_SIZE, SIG_LEN))
+    train_data = rand_periodic(NUM_COMPONENTS, TRAIN_SIZE, SIG_LEN)
     log('done simulating')
 
     lm = LayerManager(auto_summaries=False)
@@ -117,15 +113,14 @@ def train():
         #last = lm.nn_layer([delay(last, i) for i in range(16)], HIDDEN_LAYER_SIZE, 'predictor/causalconv', act=id_act, **do_bn)
         res = last
         all_res.append(res)
-        for res_layers in range(RES_LAYERS):
+        for res_layer, cur_delay in enumerate(DELAYS):
             tanh_input = last
             sigmoid_input = last
             # Dilated causal convolution
-            for i in range(NUM_HIDDEN_LAYERS-1):
-                tanh_input = lm.nn_layer([tanh_input, delay(tanh_input, 2**i)], HIDDEN_LAYER_SIZE, 'predictor/res{}/hiddenT{}'.format(res_layers, i), act=id_act, **do_bn)
-                sigmoid_input = lm.nn_layer([sigmoid_input, delay(sigmoid_input, 2 ** i)], HIDDEN_LAYER_SIZE, 'predictor/res{}/hiddenS{}'.format(res_layers, i), act=id_act, **do_bn)
-            last = tf.nn.tanh(tanh_input)*tf.nn.sigmoid(sigmoid_input)
-            last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'predictor/res{}/hidden'.format(res_layers), act=id_act, **do_bn)
+            tanh = lm.nn_layer([tanh_input, delay(tanh_input, cur_delay)], HIDDEN_LAYER_SIZE, 'predictor/res{}T'.format(res_layer), act=tf.nn.tanh, **do_bn)
+            sigmoid = lm.nn_layer([sigmoid_input, delay(sigmoid_input, cur_delay)], HIDDEN_LAYER_SIZE, 'predictor/res{}S'.format(res_layer), act=tf.nn.sigmoid, **do_bn)
+            last = tanh*sigmoid
+            last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'predictor/res{}/hidden'.format(res_layer), act=id_act, **do_bn)
             res, last = last, last + res
             all_res.append(res)
         last = lm.nn_layer(all_res, HIDDEN_LAYER_SIZE, 'output/hidden', act=tf.nn.relu, **do_bn)
@@ -136,7 +131,8 @@ def train():
     def predictor(data):
         last = tf.expand_dims(data, 2)
         ones = tf.ones_like(last, dtype=last.dtype)
-        last = tf.concat(2, (last, ones))
+        noise = tf.random_normal(tf.shape(last))
+        last = tf.concat(2, (last + 0.1*noise, ones))
         return sub_predictor(last)
 
     def full_model(data):
@@ -148,14 +144,16 @@ def train():
         quantized_targets = quantizer(targets, QUANT_LOWER, QUANT_UPPER, QUANT_LEVELS)
         with tf.name_scope('error'):
             batch_error = tf.reduce_mean(tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(output_logits, quantized_targets), reduction_indices=[1]))
+            weight_decay = sum([tf.reduce_sum(t ** 2) for t in lm.variables()])
 
-            lm.summaries.scalar_summary('error', (running_error + batch_error)/(num_runs + 1.0))
+            lm.summaries.scalar_summary('training error', (running_error + batch_error)/(num_runs + 1.0))
+            lm.summaries.scalar_summary('weight decay', weight_decay)
         num_copies = 85
         image = tf.reshape(
             tf.tile(tf.expand_dims(tf.transpose(tf.pack([tf.cast(data, tf.float32) for data in [quantized_targets - QUANT_LEVELS//2, output_mean - QUANT_LEVELS//2, quantized_targets - output_mean]]), perm=[1, 0, 2]), 2),
                     [1, 1, num_copies, 1]), [-1, 3 * num_copies, SIG_LEN-1])
         lm.summaries.image_summary('posterior_sample', tf.expand_dims(image, -1), 5)
-        return output_mean, batch_error
+        return output_mean, batch_error, batch_error + 0.1*weight_decay
 
     def prior_model(init):
         def fn(acc, _):
@@ -180,24 +178,34 @@ def train():
         sample_image = lm.summaries.image_summary('prior_sample', tf.expand_dims(image, -1), PRIOR_BATCH_SIZE)
         return output_mean, sample_image
 
+
+    # def serial_prior_model(init):
+    #
+    #     def body(*args):
+    #
+    #
+    #
+    #
+
     with tf.name_scope('posterior'):
-        posterior_mean, training_error = full_model(training_batch)
+        posterior_mean, _, training_error = full_model(training_batch)
     training_merged = lm.summaries.merge_all_summaries()
+    lm.is_training = False
     tf.get_variable_scope().reuse_variables()
     with tf.name_scope('prior'):
         prior_sample, prior_sample_summary = prior_model_with_summary()
     lm.summaries.reset()
     with tf.name_scope('test'):
-        _, test_error = full_model(test_batch)
+        _, test_error, _ = full_model(test_batch)
         accum_test_error = [num_runs.assign(num_runs+1.0), running_error.assign(running_error+test_error)]
     test_merged = lm.summaries.merge_all_summaries()
 
-    saver = tf.train.Saver(tf.trainable_variables())
+    saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
 
     batch = tf.Variable(0)
     learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, batch, 5000, 0.8, staircase=True)
 
-    train_step = tf.train.AdamOptimizer(learning_rate).minimize(training_error, global_step=batch, var_list=lm.filter_factory.variables + lm.weight_factory.variables + lm.bias_factory.variables)
+    train_step = tf.train.AdamOptimizer(learning_rate).minimize(training_error, global_step=batch, var_list=lm.variables())
 
     with tf.Session() as sess:
         sess.run(tf.initialize_all_variables())
@@ -253,19 +261,26 @@ def train():
             plt.ioff()
             fig = plt.figure()
             ax = fig.add_subplot(111)
-            init = numpy.zeros((1, SIG_LEN, 2), dtype=numpy.float32)
-            init[0, :, 0] = train_data[0, :]
-            init[0, :, 1] = 1.0
-            prior = prior_model(init)
-            def plot_prior(_):
-                prior_samples, = sess.run([prior])
-                plt.cla()
-                ax.plot(prior_samples[0, :])
-                plt.draw()
-            plot_prior(None)
-            cid = fig.canvas.mpl_connect('button_press_event', plot_prior)
-            plt.show()
-            fig.canvas.mpl_disconnect(cid)
+            logit, = sess.run([predictor(fed_input_data)], feed_dict={fed_input_data: train_data[10:20, :]})
+
+            def softmax(x, axis=None):
+                x = x - x.max(axis=axis, keepdims=True)
+                x = numpy.exp(x)
+                return x/numpy.sum(x, axis=axis, keepdims=True)
+
+            import IPython
+            IPython.embed()
+
+
+            # def plot_prior(_):
+            #     prior_samples, = sess.run([prior])
+            #     plt.cla()
+            #     ax.plot(prior_samples[0, :])
+            #     plt.draw()
+            # plot_prior(None)
+            # cid = fig.canvas.mpl_connect('button_press_event', plot_prior)
+            # plt.show()
+            # fig.canvas.mpl_disconnect(cid)
 
         coord.request_stop()
         coord.join(threads)

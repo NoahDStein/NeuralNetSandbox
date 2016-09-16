@@ -81,8 +81,8 @@ class VariableFactory(object):
             var = tf.get_variable(name, *args, initializer=self.init(shape), **kwargs)
         except TypeError:
             var = tf.get_variable(name, *args, **kwargs)
-
-        self.variables.append(var)
+        if not tf.get_variable_scope().reuse:
+            self.variables.append(var)
         if self.summaries is not None and not tf.get_variable_scope().reuse:
             summary_name = tf.get_variable_scope().name + '/' + name
             with tf.name_scope('summaries'):
@@ -101,7 +101,8 @@ class VariableFactory(object):
 class LayerManager(object):
     def __init__(self, forward_biased_estimate=False, is_training=True, auto_summaries=True):
         self.summaries = SummaryAccumulator()
-        if auto_summaries:
+        self.auto_summaries = auto_summaries
+        if self.auto_summaries:
             var_summaries = self.summaries
         else:
             var_summaries = None
@@ -112,6 +113,8 @@ class LayerManager(object):
         self.is_training = is_training
         self.forward_biased_estimate = forward_biased_estimate
 
+    def variables(self):
+        return self.weight_factory.variables + self.filter_factory.variables + self.bias_factory.variables + self.scale_factory.variables
 
     def nn_layer(self, input_tensor, output_dim, scope, act, scale=None, bias=True, bn=False):
         if scale is None:
@@ -145,17 +148,22 @@ class LayerManager(object):
                 preactivate = preactivate+bias_var
             self.summaries.histogram_summary(layer_name + '/pre_activations', preactivate)
             activations = act(preactivate)
-            try:
-                for i in range(len(activations)):
-                    self.summaries.histogram_summary(layer_name + '/activations{}'.format(i), activations[i])
-            except TypeError:
-                self.summaries.histogram_summary(layer_name + '/activations', activations)
+            if self.auto_summaries:
+                try:
+                    for i in range(len(activations)):
+                        self.summaries.histogram_summary(layer_name + '/activations{}'.format(i), activations[i])
+                except TypeError:
+                    self.summaries.histogram_summary(layer_name + '/activations', activations)
             return activations
 
 
-    def conv_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', scale=None, bias=True, bn=False):
+    def conv_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', transpose=False, scale=None, bias=True, bn=False):
         if scale is None:
             scale = bn  # scale should default to True for bn and False otherwise
+        if transpose:
+            conv_op = tf.nn.conv2d_transpose
+        else:
+            conv_op = tf.nn.conv2d
         with tf.variable_scope(scope):
             layer_name = tf.get_variable_scope().name
             preactivate = 0.0
@@ -163,7 +171,7 @@ class LayerManager(object):
             for i in range(len(input_tensor)):
                 num_channels_in = input_tensor[i].get_shape().as_list()[3]
                 filters = self.filter_factory.get_variable('filter{}'.format(i), [filter_height, filter_width, num_channels_in, num_filters])
-                preactivate = preactivate + tf.nn.conv2d(input_tensor[i], filters, strides=[1, 1, 1, 1], padding=padding)
+                preactivate = preactivate + conv_op(input_tensor[i], filters, strides=[1, 1, 1, 1], padding=padding)
             if bn:
                 preactivate = self.batch_normalization(preactivate, layer_name + '/bn', normalization_indices=[0, 1, 2])
             if scale:
