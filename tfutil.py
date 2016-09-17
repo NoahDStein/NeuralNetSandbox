@@ -157,13 +157,9 @@ class LayerManager(object):
             return activations
 
 
-    def conv_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', transpose=False, scale=None, bias=True, bn=False):
+    def conv_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', strides=None, scale=None, bias=True, bn=False):
         if scale is None:
             scale = bn  # scale should default to True for bn and False otherwise
-        if transpose:
-            conv_op = tf.nn.conv2d_transpose
-        else:
-            conv_op = tf.nn.conv2d
         with tf.variable_scope(scope):
             layer_name = tf.get_variable_scope().name
             preactivate = 0.0
@@ -171,7 +167,7 @@ class LayerManager(object):
             for i in range(len(input_tensor)):
                 num_channels_in = input_tensor[i].get_shape().as_list()[3]
                 filters = self.filter_factory.get_variable('filter{}'.format(i), [filter_height, filter_width, num_channels_in, num_filters])
-                preactivate = preactivate + conv_op(input_tensor[i], filters, strides=[1, 1, 1, 1], padding=padding)
+                preactivate = preactivate + tf.nn.conv2d(input_tensor[i], filters, strides=strides or [1, 1, 1, 1], padding=padding)
             if bn:
                 preactivate = self.batch_normalization(preactivate, layer_name + '/bn', normalization_indices=[0, 1, 2])
             if scale:
@@ -188,6 +184,40 @@ class LayerManager(object):
             except TypeError:
                 self.summaries.histogram_summary(layer_name + '/activations', activations)
             return activations
+
+
+    def conv_transpose_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', strides=None, scale=None, bias=True, bn=False):
+        if scale is None:
+            scale = bn  # scale should default to True for bn and False otherwise
+        with tf.variable_scope(scope):
+            layer_name = tf.get_variable_scope().name
+            preactivate = 0.0
+            input_tensor = listify(input_tensor)
+            for i in range(len(input_tensor)):
+                input_shape = input_tensor[i].get_shape().as_list()
+                num_channels_in = input_shape[3]
+                filters = self.filter_factory.get_variable('filter{}'.format(i), [filter_height, filter_width, num_filters, num_channels_in])
+                output_shape = [tf.shape(input_tensor[i])[0], input_shape[1]*strides[1], input_shape[2]*strides[2], num_filters]
+                preactivate = preactivate + tf.nn.conv2d_transpose(input_tensor[i], filters, output_shape=output_shape, strides=strides or [1, 1, 1, 1], padding=padding)
+            output_shape[0] = None
+            preactivate.set_shape(output_shape)
+            if bn:
+                preactivate = self.batch_normalization(preactivate, layer_name + '/bn', normalization_indices=[0, 1, 2])
+            if scale:
+                scale_var = self.scale_factory.get_variable('scale{}'.format(i), [1])
+                preactivate = tf.nn.softplus(scale_var)*preactivate
+            if bias:
+                bias_var = self.bias_factory.get_variable('bias', [num_filters])
+                preactivate = preactivate+bias_var
+            self.summaries.histogram_summary(layer_name + '/pre_activations', preactivate)
+            activations = act(preactivate)
+            try:
+                for i in range(len(activations)):
+                    self.summaries.histogram_summary(layer_name + '/activations{}'.format(i), activations[i])
+            except TypeError:
+                self.summaries.histogram_summary(layer_name + '/activations', activations)
+            return activations
+
 
     def max_pool(self, value, *args, **kwargs):
         return tf.reduce_max(
@@ -288,3 +318,15 @@ def tensor_roll_scalar(tensor, shift, axis, ndim):  # roll a tensor by a scalar 
     else:
         permuted_tensor = tensor
     return tf.transpose(roll0d(permuted_tensor, shift), perm=dims)
+
+
+class FixedLengthQueue():
+    def __init__(self, shape, length):
+        self.length = length
+        self.contents = tf.Variable(numpy.zeros((length,) + shape, dtype=numpy.float32), trainable=False)
+
+    def current(self):
+        return self.contents[0, ...]
+
+    def push(self, val):
+        self.contents.assign(tf.concat(0, (self.contents[:self.length, ...], val)))

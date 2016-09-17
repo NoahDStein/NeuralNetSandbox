@@ -2,6 +2,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import functools
 import numpy
 import tensorflow as tf
 
@@ -123,8 +124,19 @@ def train():
             last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'predictor/res{}/hidden'.format(res_layer), act=id_act, **do_bn)
             res, last = last, last + res
             all_res.append(res)
-        last = lm.nn_layer(all_res, HIDDEN_LAYER_SIZE, 'output/hidden', act=tf.nn.relu, **do_bn)
-        last = lm.nn_layer(last, QUANT_LEVELS, 'output/logits', act=id_act, **do_bn)
+
+
+        last = tf.concat(3, [tf.expand_dims(r, 3) for r in all_res])
+        num_layers = len(all_res)
+
+        last = lm.conv_transpose_layer(last, 1, 5, num_layers//2, 'output/conv0', act=tf.nn.relu, strides=[1, 1, 2, 1], padding='SAME', **do_bn)
+        last = lm.conv_transpose_layer(last, 1, 5, num_layers//4, 'output/conv1', act=tf.nn.relu, strides=[1, 1, 2, 1], padding='SAME', **do_bn)
+        last = lm.conv_transpose_layer(last, 1, 5, num_layers//8, 'output/conv2', act=tf.nn.relu, strides=[1, 1, 2, 1], padding='SAME', **do_bn)
+        last = lm.conv_layer(last, 1, 5, 1, 'output/conv3', act=id_act, padding='SAME', **do_bn)
+        last = last[:, :, :, 0]
+
+        # last = lm.nn_layer(all_res, HIDDEN_LAYER_SIZE, 'output/hidden', act=tf.nn.relu, **do_bn)
+        # last = lm.nn_layer(last, QUANT_LEVELS, 'output/logits', act=id_act, **do_bn)
         return last
 
 
