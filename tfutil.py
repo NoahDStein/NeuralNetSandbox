@@ -320,6 +320,33 @@ def tensor_roll_scalar(tensor, shift, axis, ndim):  # roll a tensor by a scalar 
     return tf.transpose(roll0d(permuted_tensor, shift), perm=dims)
 
 
+def quantizer(val, lower, upper, levels):
+    normalized = (tf.clip_by_value(val, lower, upper) - lower)/(upper - lower + 1e-6)
+    return tf.cast(tf.floor(normalized*levels), tf.int64)
+
+
+def dequantizer(val, lower, upper, levels):
+    return lower + (upper - lower) * tf.cast(val, tf.float32) / tf.cast(levels - 1, tf.float32)
+
+
+def draw_on(canvas, to_draw, color):
+    to_draw = tf.expand_dims(to_draw, 3)
+    color = tf.constant(color, tf.float32)[None, None, None, :]
+    return canvas*(1.0 - to_draw) + color*to_draw
+
+
+def crappy_plot(val, levels):
+    x_len = val.get_shape().as_list()[1]
+    left_val = tf.concat(1, (val[:, 0:1], val[:, 0:x_len - 1]))
+    right_val = tf.concat(1, (val[:, 1:], val[:, x_len - 1:]))
+
+    left_mean = (val + left_val) // 2
+    right_mean = (val + right_val) // 2
+    low_val = tf.minimum(tf.minimum(left_mean, right_mean), val)
+    high_val = tf.maximum(tf.maximum(left_mean, right_mean), val + 1)
+    return tf.cumsum(tf.one_hot(low_val, levels, axis=1) - tf.one_hot(high_val, levels, axis=1), axis=1)
+
+
 class FixedLengthQueue():
     def __init__(self, shape, length):
         self.length = length

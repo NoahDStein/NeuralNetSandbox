@@ -8,7 +8,7 @@ import tensorflow as tf
 
 import time
 
-from tfutil import LayerManager, restore_latest, modified_dynamic_shape
+from tfutil import LayerManager, restore_latest, modified_dynamic_shape, quantizer, dequantizer, crappy_plot, draw_on
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -46,10 +46,6 @@ def rand_periodic(num_components, num_signals, signal_length):
     arg = numpy.arange(1, num_components + 1).reshape(num_components, 1, 1) * counter
     return numpy.einsum('ij,ijk->jk', sin_coeff, numpy.sin(arg)) + numpy.einsum('ij,ijk->jk', cos_coeff, numpy.cos(arg))
 
-def quantizer(val, lower, upper, levels):
-    normalized = (tf.clip_by_value(val, lower, upper) - lower)/(upper - lower + 1e-6)
-    return tf.cast(tf.floor(normalized*levels), tf.int64)
-
 def delay(tensor, steps):
     if steps == 0:
         return tensor
@@ -63,7 +59,6 @@ def delay(tensor, steps):
         delayed_tensor = tf.concat(1, (shifted_tensor, zeros))
     delayed_tensor.set_shape(static_shape)
     return delayed_tensor
-
 
 def log_std_act(log_std):
     return tf.clip_by_value(log_std, -4.0, 4.0)
@@ -104,8 +99,8 @@ def train():
 
     def sub_predictor(last):
         all_res = []
-        # Causal convolution -- may be better implemented as a convolution
 
+        # Causal convolution
         FILTER_SIZE = 16
         zeros = tf.zeros(modified_dynamic_shape(last, [None, FILTER_SIZE-1, None]), dtype=last.dtype)
         last = tf.expand_dims(tf.concat(1, (zeros, last)), 1)
@@ -160,20 +155,21 @@ def train():
 
             lm.summaries.scalar_summary('training error', (running_error + batch_error)/(num_runs + 1.0))
             lm.summaries.scalar_summary('weight decay', weight_decay)
-        num_copies = 85
-        image = tf.reshape(
-            tf.tile(tf.expand_dims(tf.transpose(tf.pack([tf.cast(data, tf.float32) for data in [quantized_targets - QUANT_LEVELS//2, output_mean - QUANT_LEVELS//2, quantized_targets - output_mean]]), perm=[1, 0, 2]), 2),
-                    [1, 1, num_copies, 1]), [-1, 3 * num_copies, SIG_LEN-1])
-        lm.summaries.image_summary('posterior_sample', tf.expand_dims(image, -1), 5)
+        output_plot = crappy_plot(output_mean, QUANT_LEVELS)
+        target_plot = crappy_plot(quantized_targets, QUANT_LEVELS)
+
+        image = draw_on(1.0, target_plot, [1.0, 0.0, 0.0])    # The first 1.0 starts with a white canvas
+        image = draw_on(image, output_plot, [0.0, 0.0, 1.0])
+
+        lm.summaries.image_summary('posterior_sample', image, 5)
         return output_mean, batch_error, batch_error + 0.1*weight_decay
 
     def prior_model(init):
         def fn(acc, _):
             next_logit = sub_predictor(acc)
-            # The logit multiplier is a hack which reduces randomness by artificially inflating the logits
-            gumbeled = 1.0*next_logit[:, SIG_LEN-1, :] - tf.log(-tf.log(tf.random_uniform((tf.shape(acc)[0], QUANT_LEVELS))))
+            gumbeled = next_logit[:, SIG_LEN-1, :] - tf.log(-tf.log(tf.random_uniform((tf.shape(acc)[0], QUANT_LEVELS))))
             sample_disc = tf.arg_max(gumbeled, 1)
-            sample_cont = QUANT_LOWER + (QUANT_UPPER - QUANT_LOWER)*tf.cast(sample_disc, tf.float32)/tf.cast(QUANT_LEVELS-1, tf.float32)
+            sample_cont = dequantizer(sample_disc, QUANT_LOWER, QUANT_UPPER, QUANT_LEVELS)
             sample_cont = tf.expand_dims(sample_cont, 1)
             sample_cont = tf.expand_dims(sample_cont, 1) # sic
             sample_cont = tf.concat(2, (sample_cont, tf.ones_like(sample_cont)))
@@ -183,21 +179,12 @@ def train():
 
     def prior_model_with_summary():
         init = numpy.zeros((PRIOR_BATCH_SIZE, SIG_LEN, 2), dtype=numpy.float32)
-        output_mean = prior_model(init)
+        output_sample = prior_model(init)
 
-        num_copies = 255
-        image = tf.tile(tf.expand_dims(output_mean, 1), [1, num_copies, 1])
-        sample_image = lm.summaries.image_summary('prior_sample', tf.expand_dims(image, -1), PRIOR_BATCH_SIZE)
-        return output_mean, sample_image
+        image = draw_on(1.0, crappy_plot(quantizer(output_sample, QUANT_LOWER, QUANT_UPPER, QUANT_LEVELS), QUANT_LEVELS), [0.0, 0.0, 1.0])
 
-
-    # def serial_prior_model(init):
-    #
-    #     def body(*args):
-    #
-    #
-    #
-    #
+        sample_image = lm.summaries.image_summary('prior_sample', image, PRIOR_BATCH_SIZE)
+        return output_sample, sample_image
 
     with tf.name_scope('posterior'):
         posterior_mean, _, training_error = full_model(training_batch)
@@ -282,17 +269,6 @@ def train():
 
             import IPython
             IPython.embed()
-
-
-            # def plot_prior(_):
-            #     prior_samples, = sess.run([prior])
-            #     plt.cla()
-            #     ax.plot(prior_samples[0, :])
-            #     plt.draw()
-            # plot_prior(None)
-            # cid = fig.canvas.mpl_connect('button_press_event', plot_prior)
-            # plt.show()
-            # fig.canvas.mpl_disconnect(cid)
 
         coord.request_stop()
         coord.join(threads)
