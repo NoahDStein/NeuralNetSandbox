@@ -162,7 +162,7 @@ def train():
         image = draw_on(image, output_plot, [0.0, 0.0, 1.0])
 
         lm.summaries.image_summary('posterior_sample', image, 5)
-        return output_mean, batch_error, batch_error + 0.1*weight_decay
+        return output_mean, batch_error, batch_error #+ 0.1*weight_decay
 
     def prior_model(init):
         def fn(acc, _):
