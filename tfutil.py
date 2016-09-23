@@ -347,13 +347,13 @@ def crappy_plot(val, levels):
     return tf.cumsum(tf.one_hot(low_val, levels, axis=1) - tf.one_hot(high_val, levels, axis=1), axis=1)
 
 
-class FixedLengthQueue():
-    def __init__(self, shape, length):
-        self.length = length
-        self.contents = tf.Variable(numpy.zeros((length,) + shape, dtype=numpy.float32), trainable=False)
-
-    def current(self):
-        return self.contents[0, ...]
-
-    def push(self, val):
-        self.contents.assign(tf.concat(0, (self.contents[:self.length, ...], val)))
+def queue_append_and_update(axis, old_contents, contents_to_append):
+    ndims = old_contents.get_shape().ndims
+    slice_begin = numpy.zeros(shape=(ndims,), dtype=numpy.int32)
+    slice_begin[axis] = contents_to_append.get_shape().as_list()[axis]
+    slice_size = -numpy.ones(shape=(ndims,), dtype=numpy.int32)
+    concatenated_contents = tf.concat(axis, (old_contents[:contents_to_append.get_shape().as_list()[0], ...], contents_to_append))
+    paddings = [[0, 0]] * ndims
+    paddings[0] = [0, old_contents.get_shape().as_list()[0] - contents_to_append.get_shape().as_list()[0]]
+    updated_contents = tf.pad(tf.slice(concatenated_contents, slice_begin, slice_size), paddings)
+    return concatenated_contents, updated_contents
