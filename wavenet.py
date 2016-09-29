@@ -8,7 +8,7 @@ import tensorflow.contrib.slim as slim
 
 import time
 
-from tfutil import LayerManager, restore_latest, modified_dynamic_shape, quantizer, dequantizer, crappy_plot, draw_on, \
+from tfutil import restore_latest, modified_dynamic_shape, quantizer, dequantizer, crappy_plot, draw_on, \
     queue_append_and_update, modified_static_shape
 
 flags = tf.app.flags
@@ -81,8 +81,6 @@ def train():
     test_data = rand_periodic(NUM_COMPONENTS, TEST_SIZE, SIG_LEN)
     train_data = rand_periodic(NUM_COMPONENTS, TRAIN_SIZE, SIG_LEN)
     log('done simulating')
-
-    lm = LayerManager(auto_summaries=False)
 
     with tf.name_scope('input'):
         all_train_data_initializer = tf.placeholder(tf.float32, [TRAIN_SIZE, SIG_LEN])
@@ -167,7 +165,7 @@ def train():
         with tf.name_scope('error'):
             batch_error = tf.reduce_mean(tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(output_logits, quantized_targets), reduction_indices=[1]))
 
-            lm.summaries.scalar_summary('training error', (running_error + batch_error)/(num_runs + 1.0))
+            error_summary = tf.scalar_summary('training error', (running_error + batch_error)/(num_runs + 1.0))
         output_plot = crappy_plot(output_mean, QUANT_LEVELS)
         target_plot = crappy_plot(quantized_targets, QUANT_LEVELS)
 
@@ -183,8 +181,9 @@ def train():
         # image = draw_on(1.0, target_plot, [1.0, 0.0, 0.0])    # The first 1.0 starts with a white canvas
         # image = draw_on(image, output_plot, [0.0, 0.0, 1.0])
 
-        lm.summaries.image_summary('posterior_sample', image, 5)
-        return output_mean, queue_updates, batch_error, batch_error #+ 0.1*weight_decay
+        sample_summary = tf.image_summary('posterior_sample', image, 5)
+        summaries = tf.merge_summary([error_summary, sample_summary])
+        return output_mean, queue_updates, batch_error, batch_error, summaries #+ 0.1*weight_decay
 
     def prior_model(prior_queue_init, length=SIG_LEN):
         def cond(loop_counter, *_):
@@ -223,21 +222,18 @@ def train():
         output_probs = tf.reshape(tf.cast(tf.nn.softmax(tf.reshape(tf.cast(output_logits, tf.float64), [-1, QUANT_LEVELS])), tf.float32), [-1, SIG_LEN, QUANT_LEVELS])
         image = draw_on(tf.transpose(output_probs, perm=[0, 2, 1])[:, :, :, None], crappy_plot(quantizer(output_sample, QUANT_LOWER, QUANT_UPPER, QUANT_LEVELS), QUANT_LEVELS), [0.0, 0.0, 1.0])
 
-        sample_image = lm.summaries.image_summary('prior_sample', image, PRIOR_BATCH_SIZE)
+        sample_image = tf.image_summary('prior_sample', image, PRIOR_BATCH_SIZE)
         return output_sample, sample_image
 
     with tf.name_scope('posterior'):
-        posterior_mean, queue_updates, _, training_error = full_model(training_batch)
-    training_merged = lm.summaries.merge_all_summaries()
+        posterior_mean, queue_updates, _, training_error, training_merged = full_model(training_batch)
     with slim.arg_scope([slim.batch_norm, slim.dropout], is_training=False):
         tf.get_variable_scope().reuse_variables()
         with tf.name_scope('prior'):
             prior_sample, prior_sample_summary = prior_model_with_summary(queue_updates)
-        lm.summaries.reset()
         with tf.name_scope('test'):
-            _, _, test_error, _ = full_model(test_batch)
+            _, _, test_error, _, test_merged = full_model(test_batch)
             accum_test_error = [num_runs.assign(num_runs+1.0), running_error.assign(running_error+test_error)]
-    test_merged = lm.summaries.merge_all_summaries()
 
     saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
 
