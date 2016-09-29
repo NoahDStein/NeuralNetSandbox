@@ -30,7 +30,8 @@ import scipy.stats
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 
-from tfutil import LayerManager, log
+from tfutil import log
+from tfutil_deprecated import LayerManager
 
 SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
 IMAGE_SIZE = 28

@@ -10,7 +10,7 @@ import time
 import matplotlib, seaborn
 from sklearn import manifold
 import pickle
-from tfutil import LayerManager
+from tfutil_deprecated import LayerManager
 nets_dir = './nets'
 file_name = os.path.splitext(os.path.basename(__file__))[0]
 flags = tf.app.flags

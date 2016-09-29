@@ -25,7 +25,8 @@ from __future__ import print_function
 import numpy
 import tensorflow as tf
 
-from tfutil import LayerManager, log, ConstantInit
+from tfutil import log
+from tfutil_deprecated import LayerManager, ConstantInit
 
 ROWS = 10
 COLS = 10

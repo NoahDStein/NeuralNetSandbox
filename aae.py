@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 import time
 
-from tfutil import LayerManager
+from tfutil_deprecated import LayerManager
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS

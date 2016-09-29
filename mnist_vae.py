@@ -30,7 +30,8 @@ import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 import os, sys
 
-from tfutil import LayerManager, listify, log, restore_latest
+from tfutil import listify, log, restore_latest
+from tfutil_deprecated import LayerManager
 from mnist_basic import classifier
 
 flags = tf.app.flags
