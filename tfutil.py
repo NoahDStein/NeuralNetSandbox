@@ -157,7 +157,7 @@ class LayerManager(object):
             return activations
 
 
-    def conv_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', strides=None, scale=None, bias=True, bn=False):
+    def conv_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', strides=None, scale=None, bias=True, bias_dim=1, bn=False):
         if scale is None:
             scale = bn  # scale should default to True for bn and False otherwise
         with tf.variable_scope(scope):
@@ -174,7 +174,8 @@ class LayerManager(object):
                 scale_var = self.scale_factory.get_variable('scale{}'.format(i), [1])
                 preactivate = tf.nn.softplus(scale_var)*preactivate
             if bias:
-                bias_var = self.bias_factory.get_variable('bias', [num_filters])
+                bias_shape = preactivate.get_shape().as_list()[-bias_dim:]
+                bias_var = self.bias_factory.get_variable('bias', bias_shape)
                 preactivate = preactivate+bias_var
             self.summaries.histogram_summary(layer_name + '/pre_activations', preactivate)
             activations = act(preactivate)
@@ -186,7 +187,7 @@ class LayerManager(object):
             return activations
 
 
-    def conv_transpose_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', strides=None, scale=None, bias=True, bn=False):
+    def conv_transpose_layer(self, input_tensor, filter_height, filter_width, num_filters, scope, act, padding='SAME', strides=None, scale=None, bias=True, bias_dim=1, bn=False):
         if scale is None:
             scale = bn  # scale should default to True for bn and False otherwise
         with tf.variable_scope(scope):
@@ -207,7 +208,8 @@ class LayerManager(object):
                 scale_var = self.scale_factory.get_variable('scale{}'.format(i), [1])
                 preactivate = tf.nn.softplus(scale_var)*preactivate
             if bias:
-                bias_var = self.bias_factory.get_variable('bias', [num_filters])
+                bias_shape = preactivate.get_shape().as_list()[-bias_dim:]
+                bias_var = self.bias_factory.get_variable('bias', bias_shape)
                 preactivate = preactivate+bias_var
             self.summaries.histogram_summary(layer_name + '/pre_activations', preactivate)
             activations = act(preactivate)

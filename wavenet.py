@@ -2,14 +2,14 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import functools
 import numpy
 import tensorflow as tf
+import tensorflow.contrib.slim as slim
 
 import time
 
 from tfutil import LayerManager, restore_latest, modified_dynamic_shape, quantizer, dequantizer, crappy_plot, draw_on, \
-    VariableFactory, ConstantInit, queue_append_and_update, modified_static_shape
+    queue_append_and_update, modified_static_shape
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -97,9 +97,9 @@ def train():
         running_error = tf.Variable(0.0, trainable=False, collections=[])
         fed_input_data = tf.placeholder(tf.float32, [None, SIG_LEN])
 
-
     def sub_predictor(input_val, queue_contents=None):
         queue_updates = []
+
         def next_queue(model_tensor, depth):
             if queue_contents is None:
                 new_shape = [None] * model_tensor.get_shape().ndims
@@ -115,37 +115,38 @@ def train():
         last = input_val
         # Causal convolution
         FILTER_SIZE = 16
-        last = next_queue(last, FILTER_SIZE-1)
-        last = tf.expand_dims(last, 1)
-        last = lm.conv_layer(last, 1, FILTER_SIZE, HIDDEN_LAYER_SIZE, 'predictor/causalconv', act=id_act, padding='VALID', **do_bn)
-        last = tf.reshape(last, modified_static_shape(input_val, [None, None, HIDDEN_LAYER_SIZE]))
-        res = last
-        all_res.append(res)
-        for res_layer, cur_delay in enumerate(DELAYS):
-            total = next_queue(last, cur_delay)
-            last = total[:, cur_delay:, :]
-            delayed_last = total[:, :-cur_delay, :]
-            # Dilated causal convolution
-            tanh = lm.nn_layer([last, delayed_last], HIDDEN_LAYER_SIZE, 'predictor/res{}T'.format(res_layer), act=tf.nn.tanh, **do_bn)
-            sigmoid = lm.nn_layer([last, delayed_last], HIDDEN_LAYER_SIZE, 'predictor/res{}S'.format(res_layer), act=tf.nn.sigmoid, **do_bn)
-            last = tanh*sigmoid
-            last = lm.nn_layer(last, HIDDEN_LAYER_SIZE, 'predictor/res{}/hidden'.format(res_layer), act=id_act, **do_bn)
-            res, last = last, last + res
+        bn_params = dict(decay=0.95, scope='bn', updates_collections=None)
+        with slim.arg_scope([slim.conv2d, slim.fully_connected], normalizer_fn=slim.batch_norm, normalizer_params=bn_params, num_outputs=HIDDEN_LAYER_SIZE):
+            last = next_queue(last, FILTER_SIZE-1)
+            last = tf.expand_dims(last, 1)
+            last = slim.conv2d(last, kernel_size=(1, FILTER_SIZE), padding='VALID', activation_fn=None, scope='predictor/causalconv')
+            last = tf.reshape(last, modified_static_shape(input_val, [None, None, HIDDEN_LAYER_SIZE]))
+            res = last
             all_res.append(res)
+            for res_layer, cur_delay in enumerate(DELAYS):
+                total = next_queue(last, cur_delay)
+                last = tf.concat(2, (total[:, cur_delay:, :], total[:, :-cur_delay, :]))
+                # Dilated causal convolution
+                tanh = slim.fully_connected(last, activation_fn=tf.nn.tanh, scope='predictor/res{}T'.format(res_layer))
+                sigmoid = slim.fully_connected(last, activation_fn=tf.nn.sigmoid, scope='predictor/res{}S'.format(res_layer))
+                last = slim.fully_connected(tanh*sigmoid, activation_fn=None, scope='predictor/res{}/hidden'.format(res_layer))
+                res, last = last, last + res
+                all_res.append(res)
 
 
-        last = tf.concat(3, [tf.expand_dims(r, 3) for r in all_res])
-        num_layers = len(all_res)
+            # last = tf.concat(3, [tf.expand_dims(r, 3) for r in all_res])
+            # num_layers = len(all_res)
 
-        # Need to keep these convolutions as not running over time or else add queues
-        last = lm.conv_transpose_layer(last, 1, 5, num_layers//2, 'output/conv0', act=tf.nn.relu, strides=[1, 1, 2, 1], padding='SAME', **do_bn)
-        last = lm.conv_transpose_layer(last, 1, 5, num_layers//4, 'output/conv1', act=tf.nn.relu, strides=[1, 1, 2, 1], padding='SAME', **do_bn)
-        last = lm.conv_transpose_layer(last, 1, 5, num_layers//8, 'output/conv2', act=tf.nn.relu, strides=[1, 1, 2, 1], padding='SAME', **do_bn)
-        last = lm.conv_layer(last, 1, 5, 1, 'output/conv3', act=id_act, padding='SAME', **do_bn)
-        last = last[:, :, :, 0]
+            # Need to keep these convolutions as not running over time or else add queues
+            # last = lm.conv_transpose_layer(last, 1, 5, num_layers//2, 'output/conv0', act=tf.nn.relu, strides=[1, 1, 2, 1], padding='SAME', bias_dim=2, **do_bn)
+            # last = lm.conv_transpose_layer(last, 1, 5, num_layers//4, 'output/conv1', act=tf.nn.relu, strides=[1, 1, 2, 1], padding='SAME', bias_dim=2, **do_bn)
+            # last = lm.conv_transpose_layer(last, 1, 5, num_layers//8, 'output/conv2', act=tf.nn.relu, strides=[1, 1, 2, 1], padding='SAME', bias_dim=2, **do_bn)
+            # last = lm.conv_layer(last, 1, 5, 1, 'output/conv3', act=id_act, padding='SAME', bias_dim=2, **do_bn)
+            # last = last[:, :, :, 0]
 
-        # last = lm.nn_layer(all_res, HIDDEN_LAYER_SIZE, 'output/hidden', act=tf.nn.relu, **do_bn)
-        # last = lm.nn_layer(last, QUANT_LEVELS, 'output/logits', act=id_act, **do_bn)
+
+            last = slim.fully_connected(tf.concat(2, all_res), activation_fn=tf.nn.relu, scope='output/hidden')
+            last = slim.fully_connected(last, num_outputs=QUANT_LEVELS, activation_fn=None, normalizer_params=dict(bn_params, scale=True), scope='output/logits')
         return last, queue_updates
 
 
@@ -165,17 +166,18 @@ def train():
         quantized_targets = quantizer(targets, QUANT_LOWER, QUANT_UPPER, QUANT_LEVELS)
         with tf.name_scope('error'):
             batch_error = tf.reduce_mean(tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(output_logits, quantized_targets), reduction_indices=[1]))
-            weight_decay = sum([tf.reduce_sum(t ** 2) for t in lm.variables()])
 
             lm.summaries.scalar_summary('training error', (running_error + batch_error)/(num_runs + 1.0))
-            lm.summaries.scalar_summary('weight decay', weight_decay)
         output_plot = crappy_plot(output_mean, QUANT_LEVELS)
         target_plot = crappy_plot(quantized_targets, QUANT_LEVELS)
 
         M = tf.reduce_max(output_logits)
         m = tf.reduce_min(output_logits)
         scaled_logits = (output_logits-m)/(M-m)
-        image = draw_on(tf.transpose(scaled_logits, perm=[0, 2, 1])[:, :, :, None], target_plot, [1.0, 0.0, 0.0])
+        # image = draw_on(tf.transpose(scaled_logits, perm=[0, 2, 1])[:, :, :, None], target_plot, [1.0, 0.0, 0.0])
+        # Casting is to work around some stupid tf bug; shouldn't be necessary
+        output_probs = tf.reshape(tf.cast(tf.nn.softmax(tf.reshape(tf.cast(output_logits, tf.float64), [-1, QUANT_LEVELS])), tf.float32), [-1, SIG_LEN-1, QUANT_LEVELS])
+        image = draw_on(tf.transpose(output_probs, perm=[0, 2, 1])[:, :, :, None], target_plot, [1.0, 0.0, 0.0])
 
 
         # image = draw_on(1.0, target_plot, [1.0, 0.0, 0.0])    # The first 1.0 starts with a white canvas
@@ -184,30 +186,27 @@ def train():
         lm.summaries.image_summary('posterior_sample', image, 5)
         return output_mean, queue_updates, batch_error, batch_error #+ 0.1*weight_decay
 
-    def prior_model(prior_queue_init):
-        def cond(*args):
-            return tf.less(args[0], SIG_LEN)
+    def prior_model(prior_queue_init, length=SIG_LEN):
+        def cond(loop_counter, *_):
+            return tf.less(loop_counter, length)
 
-        def body(*args):
-            loop_counter = args[0]
-            accumulated_output = args[1]
-            next_input = args[2]
-            queue_contents = args[3:]
+        def body(loop_counter, accumulated_output, accumulated_logits, next_input, *queue_contents):
             next_logit, queue_updates = sub_predictor(next_input, queue_contents)
             gumbeled = next_logit[:, 0, :] - tf.log(-tf.log(tf.random_uniform((tf.shape(accumulated_output)[0], QUANT_LEVELS))))
             sample_disc = tf.arg_max(gumbeled, 1)
             sample_cont = dequantizer(sample_disc, QUANT_LOWER, QUANT_UPPER, QUANT_LEVELS)
             sample_cont = tf.expand_dims(sample_cont, 1)
             accumulated_output = tf.concat(1, (accumulated_output, sample_cont))
+            accumulated_logits = tf.concat(1, (accumulated_logits, next_logit))
             sample_cont = tf.expand_dims(sample_cont, 1) # sic
             next_input = tf.concat(2, (sample_cont, tf.ones_like(sample_cont)))
-            return [loop_counter+1, accumulated_output, next_input] + queue_updates
+            return [loop_counter+1, accumulated_output, accumulated_logits, next_input] + queue_updates
 
-        loop_var_init = [tf.constant(0, dtype=tf.int32), tf.zeros((PRIOR_BATCH_SIZE, 0)), tf.zeros((PRIOR_BATCH_SIZE, 1, 2))] + prior_queue_init
-        loop_var_end = tf.while_loop(cond, body, loop_var_init, back_prop=False)
-        output = loop_var_end[1]
-        output.set_shape((PRIOR_BATCH_SIZE, SIG_LEN))
-        return output
+        loop_var_init = [tf.constant(0, dtype=tf.int32), tf.zeros((PRIOR_BATCH_SIZE, 0)), tf.zeros((PRIOR_BATCH_SIZE, 0, QUANT_LEVELS)), tf.zeros((PRIOR_BATCH_SIZE, 1, 2))] + prior_queue_init
+        output, logits = tf.while_loop(cond, body, loop_var_init, back_prop=False)[1:3]
+        output.set_shape((PRIOR_BATCH_SIZE, length))
+        logits.set_shape((PRIOR_BATCH_SIZE, length, QUANT_LEVELS))
+        return output, logits
 
     def prior_model_with_summary(queue_model):
         prior_queue_init = []
@@ -215,9 +214,14 @@ def train():
             new_shape = tensor.get_shape().as_list()
             new_shape[0] = PRIOR_BATCH_SIZE
             prior_queue_init.append(tf.zeros(new_shape, dtype=tf.float32))
-        output_sample = prior_model(prior_queue_init)
+        output_sample, output_logits = prior_model(prior_queue_init)
 
-        image = draw_on(1.0, crappy_plot(quantizer(output_sample, QUANT_LOWER, QUANT_UPPER, QUANT_LEVELS), QUANT_LEVELS), [0.0, 0.0, 1.0])
+        M = tf.reduce_max(output_logits)
+        m = tf.reduce_min(output_logits)
+        scaled_logits = (output_logits-m)/(M-m)
+        # Casting is to work around some stupid tf bug; shouldn't be necessary
+        output_probs = tf.reshape(tf.cast(tf.nn.softmax(tf.reshape(tf.cast(output_logits, tf.float64), [-1, QUANT_LEVELS])), tf.float32), [-1, SIG_LEN, QUANT_LEVELS])
+        image = draw_on(tf.transpose(output_probs, perm=[0, 2, 1])[:, :, :, None], crappy_plot(quantizer(output_sample, QUANT_LOWER, QUANT_UPPER, QUANT_LEVELS), QUANT_LEVELS), [0.0, 0.0, 1.0])
 
         sample_image = lm.summaries.image_summary('prior_sample', image, PRIOR_BATCH_SIZE)
         return output_sample, sample_image
@@ -225,14 +229,14 @@ def train():
     with tf.name_scope('posterior'):
         posterior_mean, queue_updates, _, training_error = full_model(training_batch)
     training_merged = lm.summaries.merge_all_summaries()
-    lm.is_training = False
-    tf.get_variable_scope().reuse_variables()
-    with tf.name_scope('prior'):
-        prior_sample, prior_sample_summary = prior_model_with_summary(queue_updates)
-    lm.summaries.reset()
-    with tf.name_scope('test'):
-        _, _, test_error, _ = full_model(test_batch)
-        accum_test_error = [num_runs.assign(num_runs+1.0), running_error.assign(running_error+test_error)]
+    with slim.arg_scope([slim.batch_norm, slim.dropout], is_training=False):
+        tf.get_variable_scope().reuse_variables()
+        with tf.name_scope('prior'):
+            prior_sample, prior_sample_summary = prior_model_with_summary(queue_updates)
+        lm.summaries.reset()
+        with tf.name_scope('test'):
+            _, _, test_error, _ = full_model(test_batch)
+            accum_test_error = [num_runs.assign(num_runs+1.0), running_error.assign(running_error+test_error)]
     test_merged = lm.summaries.merge_all_summaries()
 
     saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection('BatchNormInternal'))
@@ -240,7 +244,7 @@ def train():
     batch = tf.Variable(0)
     learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, batch, 5000, 0.8, staircase=True)
 
-    train_step = tf.train.AdamOptimizer(learning_rate).minimize(training_error, global_step=batch, var_list=lm.variables())
+    train_step = tf.train.AdamOptimizer(learning_rate).minimize(training_error, global_step=batch)
 
     with tf.Session() as sess:
         sess.run(tf.initialize_all_variables())
