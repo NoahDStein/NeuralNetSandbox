@@ -189,20 +189,26 @@ def train():
         def cond(loop_counter, *_):
             return tf.less(loop_counter, length)
 
-        def body(loop_counter, accumulated_output, accumulated_logits, next_input, *queue_contents):
+        def body(loop_counter, accumulated_output_array, accumulated_logits_array, next_input, *queue_contents):
             next_logit, queue_updates = sub_predictor(next_input, queue_contents)
-            gumbeled = next_logit[:, 0, :] - tf.log(-tf.log(tf.random_uniform((tf.shape(accumulated_output)[0], QUANT_LEVELS))))
+            gumbeled = next_logit[:, 0, :] - tf.log(-tf.log(tf.random_uniform((tf.shape(next_logit)[0], QUANT_LEVELS))))
             sample_disc = tf.arg_max(gumbeled, 1)
             sample_cont = dequantizer(sample_disc, QUANT_LOWER, QUANT_UPPER, QUANT_LEVELS)
+            accumulated_output_array = accumulated_output_array.write(loop_counter, sample_cont)
+            accumulated_logits_array = accumulated_logits_array.write(loop_counter, next_logit[:, 0, :])
             sample_cont = tf.expand_dims(sample_cont, 1)
-            accumulated_output = tf.concat(1, (accumulated_output, sample_cont))
-            accumulated_logits = tf.concat(1, (accumulated_logits, next_logit))
             sample_cont = tf.expand_dims(sample_cont, 1) # sic
             next_input = tf.concat(2, (sample_cont, tf.ones_like(sample_cont)))
-            return [loop_counter+1, accumulated_output, accumulated_logits, next_input] + queue_updates
+            return [loop_counter+1, accumulated_output_array, accumulated_logits_array, next_input] + queue_updates
 
-        loop_var_init = [tf.constant(0, dtype=tf.int32), tf.zeros((PRIOR_BATCH_SIZE, 0)), tf.zeros((PRIOR_BATCH_SIZE, 0, QUANT_LEVELS)), tf.zeros((PRIOR_BATCH_SIZE, 1, 2))] + prior_queue_init
-        output, logits = tf.while_loop(cond, body, loop_var_init, back_prop=False)[1:3]
+        accumulated_output_array = tf.TensorArray(tf.float32, size=SIG_LEN, clear_after_read=False)
+        accumulated_logits_array = tf.TensorArray(tf.float32, size=SIG_LEN, clear_after_read=False)
+
+        loop_var_init = [tf.constant(0, dtype=tf.int32), accumulated_output_array, accumulated_logits_array, tf.zeros((PRIOR_BATCH_SIZE, 1, 2))] + prior_queue_init
+        accumulated_output_array, accumulated_logits_array = tf.while_loop(cond, body, loop_var_init, back_prop=False)[1:3]
+        output = tf.transpose(accumulated_output_array.pack(), [1, 0])
+        logits = tf.transpose(accumulated_logits_array.pack(), [1, 0, 2])
+
         output.set_shape((PRIOR_BATCH_SIZE, length))
         logits.set_shape((PRIOR_BATCH_SIZE, length, QUANT_LEVELS))
         return output, logits
