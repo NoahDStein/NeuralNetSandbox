@@ -99,7 +99,5 @@ def queue_append_and_update(axis, old_contents, contents_to_append):
     slice_begin[axis] = contents_to_append.get_shape().as_list()[axis]
     slice_size = -numpy.ones(shape=(ndims,), dtype=numpy.int32)
     concatenated_contents = tf.concat(axis, (old_contents[:contents_to_append.get_shape().as_list()[0], ...], contents_to_append))
-    paddings = [[0, 0]] * ndims
-    paddings[0] = [0, old_contents.get_shape().as_list()[0] - contents_to_append.get_shape().as_list()[0]]
-    updated_contents = tf.pad(tf.slice(concatenated_contents, slice_begin, slice_size), paddings)
+    updated_contents = tf.slice(concatenated_contents, slice_begin, slice_size)
     return concatenated_contents, updated_contents
