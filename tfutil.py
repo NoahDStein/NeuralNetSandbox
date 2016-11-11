@@ -67,7 +67,7 @@ def tensor_roll_scalar(tensor, shift, axis, ndim):  # roll a tensor by a scalar 
 
 
 def quantizer(val, lower, upper, levels):
-    normalized = (tf.clip_by_value(val, lower, upper) - lower)/(upper - lower + 1e-6)
+    normalized = (tf.clip_by_value(val, lower, upper) - lower)/(upper - lower)
     return tf.cast(tf.floor(normalized*levels), tf.int64)
 
 
